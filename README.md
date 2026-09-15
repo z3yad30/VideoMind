@@ -2,7 +2,7 @@
 
 AI Video Assistant is a planned production-quality MVP for uploading media or processing an authorized YouTube URL, transcribing it, generating a grounded summary, and answering text or voice questions about that specific video.
 
-This repository is being built incrementally. The current phase establishes the project layout, configuration contract, virtual environment, and dependency manifest. Application services and the frontend are intentionally not implemented yet.
+This repository is being built incrementally. Phase 2 implements backend media ingestion and timestamped ASR. RAG, TTS, summaries, and the frontend remain out of scope.
 
 ## Architecture
 
@@ -89,7 +89,7 @@ The application will load environment variables with `python-dotenv`. ASR, embed
 
 ## Running the Backend
 
-Backend startup will be documented here once the FastAPI application is implemented. The intended development command is:
+Start the backend with:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -158,12 +158,13 @@ python -m pytest
 
 ## Current Phase Validation
 
-Completed in this phase:
+Completed in Phase 2:
 
-- Created the project-root `.venv` with Python 3.13.
-- Created backend, frontend, data, and test directories.
-- Added `.env.example` with the required Groq variables.
-- Added an untracked-safe `.env` with no real API key.
-- Added `.gitignore`, dependency manifest, runtime data placeholders, and this README.
+- Added background upload and YouTube processing endpoints.
+- Added FFmpeg audio extraction to mono 16 kHz WAV.
+- Added a replaceable ASR service abstraction with a `faster-whisper` implementation.
+- Added JSON transcript artifacts preserving segment text, start seconds, and end seconds.
+- Added in-memory processing status tracking and failure reporting.
+- Added temporary media cleanup and deterministic tests for the processing pipeline.
 
-The next phase should install and compatibility-check the dependencies inside `.venv`, then implement and test the backend configuration and health endpoint before adding media processing.
+RAG, TTS, and LLM summaries are intentionally deferred to later phases.
