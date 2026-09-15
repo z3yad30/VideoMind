@@ -1,0 +1,16 @@
+# Runtime
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+python-dotenv>=1,<2
+python-multipart>=0.0.20,<1
+faster-whisper>=1.1,<2
+yt-dlp>=2025.1
+chromadb>=0.6,<2
+sentence-transformers>=3.4,<6
+groq>=0.15,<1
+pyttsx3>=2.98,<3
+
+# Development and tests
+httpx>=0.28,<1
+pytest>=8.3,<9
+pytest-asyncio>=0.25,<1

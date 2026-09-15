@@ -1,0 +1,22 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.vscode/
+
+# Local runtime data
+/data/videos/*
+/data/audio/*
+/data/transcripts/*
+/data/summaries/*
+/data/chroma/*
+
+# Keep the runtime data directories in the project tree
+!/data/videos/.gitkeep
+!/data/audio/.gitkeep
+!/data/transcripts/.gitkeep
+!/data/summaries/.gitkeep
+!/data/chroma/.gitkeep
