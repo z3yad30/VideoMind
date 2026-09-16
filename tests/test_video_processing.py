@@ -47,6 +47,23 @@ def test_processing_preserves_timestamps_and_cleans_source() -> None:
         (Path("data/transcripts") / f"{video_id}.json").unlink(missing_ok=True)
 
 
+def test_processing_emits_stage_events() -> None:
+    source = Path("data/videos/test-stage-events.wav")
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"source")
+    service = VideoProcessingService(media=FakeMedia(), asr=FakeASR())
+    video_id = service.create_job()
+
+    try:
+        service.process(video_id, source)
+        events = service.get_events(video_id)
+        assert any(event["event"] == "stage_started" and event["stage"] == "transcribing" for event in events)
+        assert any(event["event"] == "stage_completed" and event["stage"] == "transcribing" for event in events)
+        assert events[-1]["event"] == "processing_completed"
+    finally:
+        (Path("data/transcripts") / f"{video_id}.json").unlink(missing_ok=True)
+
+
 def test_processing_records_failure_and_cleans_source() -> None:
     source = Path("data/videos/test-phase2-failure.wav")
     source.parent.mkdir(parents=True, exist_ok=True)

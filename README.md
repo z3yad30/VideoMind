@@ -118,6 +118,7 @@ The planned REST surface is:
 - `POST /videos/youtube`
 - `GET /videos/{video_id}`
 - `GET /videos/{video_id}/status`
+- `GET /videos/{video_id}/events` (Server-Sent Events for live processing activity)
 - `GET /videos/{video_id}/transcript`
 - `GET /videos/{video_id}/summary`
 - `POST /videos/{video_id}/question`
@@ -125,7 +126,7 @@ The planned REST surface is:
 - `GET /videos/{video_id}/summary/audio`
 - `GET /videos/{video_id}/answers/{answer_id}/audio`
 
-Long-running processing will run in the background, with explicit statuses including `uploaded`, `downloading`, `extracting_audio`, `transcribing`, `chunking`, `embedding`, `storing_vectors`, `generating_summary`, `generating_voice_summary`, `completed`, and `failed`.
+Long-running processing runs in the background with stage snapshots and replayable events. Stages include `validating`, `downloading`, `extracting_audio`, `detecting_language`, `transcribing`, `building_transcript`, `chunking`, `embedding`, `indexing`, `summarizing`, `generating_summary_audio`, `completed`, and `failed`. The event stream emits `stage_started`, `stage_progress`, `stage_completed`, `stage_failed`, and `processing_completed`.
 
 ## RAG and ChromaDB
 
@@ -183,6 +184,12 @@ Completed in Phase 2:
 - Added JSON transcript artifacts preserving segment text, start seconds, and end seconds.
 - Added in-memory processing status tracking and failure reporting.
 - Added temporary media cleanup and deterministic tests for the processing pipeline.
+
+Completed in Phase 6:
+
+- Added backend-owned processing stage snapshots and replayable SSE events.
+- Added truthful chunk-count progress for transcript chunking, embedding, and indexing.
+- Added frontend SSE subscription, refresh recovery, activity details, and a responsive processing workspace.
 
 Completed in Phase 3:
 

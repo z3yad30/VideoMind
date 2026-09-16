@@ -55,7 +55,10 @@ class VideoProcessingService:
 
     def get_job(self, video_id: str) -> VideoJob | None:
         with self._lock:
-            return self._jobs.get(video_id)
+            job = self._jobs.get(video_id)
+            if job and job.stages is None:
+                job.stages = [self._stage_record(stage_id, name) for stage_id, name in STAGES]
+            return job
 
     def get_events(self, video_id: str) -> list[dict[str, object]]:
         with self._lock:
