@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from backend.app.core.config import settings
 
@@ -107,7 +107,7 @@ class TranscriptRAGService:
             raise ValueError("video_id must be a non-empty string")
         return f"video_{video_id}"
 
-    def index_transcript(self, video_id: str) -> list[dict[str, object]]:
+    def index_transcript(self, video_id: str, on_progress: Callable[[str, int, int], None] | None = None) -> list[dict[str, object]]:
         transcript_path = self.transcript_dir / f"{video_id}.json"
         if not transcript_path.exists():
             return []
@@ -120,6 +120,8 @@ class TranscriptRAGService:
             return []
 
         chunks = chunk_transcript(segments, self.max_chunk_characters)
+        if on_progress:
+            on_progress("chunking", len(chunks), len(chunks))
         collection = self.client.get_or_create_collection(self.collection_name(video_id))
         existing = collection.get().get("ids", [])
         if existing:
@@ -128,12 +130,17 @@ class TranscriptRAGService:
             return []
         source = str(transcript_path)
         texts = [chunk.text for chunk in chunks]
+        if on_progress:
+            on_progress("embedding", 0, len(texts))
         collection.upsert(
             ids=[chunk.chunk_id for chunk in chunks],
             documents=texts,
             metadatas=[chunk.metadata(video_id, source) for chunk in chunks],
             embeddings=embedding_rows(self.embedding_model.encode(texts)),
         )
+        if on_progress:
+            on_progress("embedding", len(texts), len(texts))
+            on_progress("indexing", len(texts), len(texts))
         return [{"text": chunk.text, "metadata": chunk.metadata(video_id, source)} for chunk in chunks]
 
     def retrieve_relevant_chunks(self, video_id: str, question: str, top_k: int = 5) -> list[dict[str, object]]:

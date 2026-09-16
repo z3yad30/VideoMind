@@ -17,7 +17,29 @@ export type VideoJob = {
   status: ProcessingStatus;
 };
 
-export type VideoStatus = VideoJob & { error?: string | null; updated_at: string };
+export type VideoStatus = VideoJob & { error?: string | null; updated_at: string; stages: ProcessingStage[] };
+export type StageStatus = "pending" | "running" | "completed" | "failed" | "skipped";
+export type ProcessingStage = {
+  id: string;
+  display_name: string;
+  status: StageStatus;
+  progress: number | null;
+  message: string | null;
+  detail: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+};
+export type ProcessingEvent = {
+  event: string;
+  video_id: string;
+  stage: string | null;
+  status: string;
+  progress: number | null;
+  message: string | null;
+  detail: string | null;
+  timestamp: string;
+};
 export type Summary = { [key: string]: string };
 export type Answer = { answer: string; sources: QuestionSource[] };
 export type VoiceAnswer = Answer & {
@@ -60,6 +82,10 @@ export function processYouTube(url: string) {
 
 export function getStatus(videoId: string) {
   return request<VideoStatus>(`/videos/${videoId}/status`);
+}
+
+export function eventsUrl(videoId: string) {
+  return apiUrl(`/videos/${videoId}/events`);
 }
 
 export function getTranscript(videoId: string) {

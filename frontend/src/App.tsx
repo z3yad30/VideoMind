@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   askQuestion,
   askVoiceQuestion,
+  eventsUrl,
   formatTime,
   getStatus,
   getSummary,
@@ -10,6 +11,8 @@ import {
   resolveMediaUrl,
   type Answer,
   type ProcessingStatus,
+  type ProcessingEvent,
+  type ProcessingStage,
   type QuestionSource,
   type Summary,
   type TranscriptSegment,
@@ -61,6 +64,9 @@ export default function App() {
   const [isAsking, setIsAsking] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
+  const [stages, setStages] = useState<ProcessingStage[]>([]);
+  const [activity, setActivity] = useState<ProcessingEvent[]>([]);
+  const [showActivity, setShowActivity] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -71,6 +77,11 @@ export default function App() {
   const isBusy = status !== null && !isReady && status.status !== "failed";
 
   useEffect(() => {
+    const recovered = window.localStorage.getItem("videomind.videoId");
+    if (recovered) setVideoId(recovered);
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
@@ -79,12 +90,14 @@ export default function App() {
   useEffect(() => {
     if (!videoId) return;
     let cancelled = false;
+    const source = new EventSource(eventsUrl(videoId));
 
     const refresh = async () => {
       try {
         const nextStatus = await getStatus(videoId);
         if (cancelled) return;
         setStatus(nextStatus);
+        setStages(nextStatus.stages || []);
         if (nextStatus.status === "completed") {
           const [transcriptResult, summaryResult] = await Promise.allSettled([getTranscript(videoId), getSummary(videoId)]);
           if (cancelled) return;
@@ -97,10 +110,16 @@ export default function App() {
     };
 
     void refresh();
-    const interval = window.setInterval(() => void refresh(), 1800);
+    const handleEvent = (message: MessageEvent) => {
+      const event = JSON.parse(message.data) as ProcessingEvent;
+      setActivity((current) => [...current.slice(-39), event]);
+      void refresh();
+    };
+    ["stage_started", "stage_progress", "stage_completed", "stage_failed", "processing_completed"].forEach((name) => source.addEventListener(name, handleEvent));
+    source.onerror = () => { source.close(); };
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      source.close();
     };
   }, [videoId]);
 
@@ -108,12 +127,15 @@ export default function App() {
     setFile(null);
     setSourceUrl("");
     setVideoId(null);
+    window.localStorage.removeItem("videomind.videoId");
     setStatus(null);
     setTranscript([]);
     setSummary(null);
     setAnswer(null);
     setVoiceQuestion("");
     setNotice(null);
+    setStages([]);
+    setActivity([]);
     setPreviewUrl(null);
   };
 
@@ -137,7 +159,8 @@ export default function App() {
     try {
       const job = file ? await uploadVideo(file) : await processYouTube(sourceUrl.trim());
       setVideoId(job.video_id);
-      setStatus({ ...job, updated_at: new Date().toISOString() });
+      window.localStorage.setItem("videomind.videoId", job.video_id);
+      setStatus({ ...job, updated_at: new Date().toISOString(), stages: [] });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : "Could not start processing." });
     } finally {
@@ -217,11 +240,11 @@ export default function App() {
         <button className="new-button" type="button" onClick={resetWorkspace}>New video <span>+</span></button>
       </header>
 
-      <section className="hero">
+      {!videoId && <section className="hero">
         <p className="eyebrow">Your video, made searchable</p>
         <h1>Understand more.<br /><em>Watch less.</em></h1>
         <p className="hero-copy">Bring a video, get the signal, ask anything.</p>
-      </section>
+      </section>}
 
       <section className="workspace">
         {!videoId && (
@@ -247,11 +270,7 @@ export default function App() {
 
         {videoId && (
           <>
-            <div className="status-banner panel">
-              <div className="status-copy"><span className={`status-dot ${status?.status === "failed" ? "is-error" : isReady ? "is-ready" : "is-loading"}`} /><div><span className="section-kicker">Processing status</span><strong>{status ? statusLabels[status.status] : "Connecting..."}</strong></div></div>
-              {status?.status === "failed" && <span className="error-inline">{status.error || "Something went wrong while processing."}</span>}
-              {isBusy && <div className="progress-track"><div className="progress-fill" style={{ width: `${Math.max(8, ((statusSteps.indexOf(status?.status || "queued") + 1) / statusSteps.length) * 100)}%` }} /></div>}
-            </div>
+            <ProcessingActivity stages={stages} activity={activity} showActivity={showActivity} onToggle={() => setShowActivity((value) => !value)} ready={isReady} />
             {status?.status === "failed" && <div className="failed-panel panel"><strong>We could not finish this video.</strong><span>Check the source and try again with a different file or link.</span><button className="secondary-button" type="button" onClick={resetWorkspace}>Try another source</button></div>}
 
             <div className="content-grid">
@@ -279,6 +298,21 @@ export default function App() {
 }
 
 function EmptyState({ text }: { text: string }) { return <div className="empty-state"><span>◌</span><p>{text}</p></div>; }
+
+function ProcessingActivity({ stages, activity, showActivity, onToggle, ready }: { stages: ProcessingStage[]; activity: ProcessingEvent[]; showActivity: boolean; onToggle: () => void; ready: boolean }) {
+  return <section className="processing-activity panel" aria-label="Processing activity">
+    <div className="activity-header"><div><span className="section-kicker">Processing activity</span><h2>{ready ? "Video ready" : "Working through your video"}</h2></div><span className={`activity-state ${ready ? "ready" : ""}`}>{ready ? "Complete" : "Live"}</span></div>
+    <div className="stage-list">
+      {stages.map((stage) => <div className={`stage-row ${stage.status}`} key={stage.id}>
+        <span className="stage-icon" aria-hidden="true">{stage.status === "completed" || stage.status === "skipped" ? "✓" : stage.status === "running" ? "◉" : stage.status === "failed" ? "×" : "○"}</span>
+        <div className="stage-main"><strong>{stage.display_name}</strong>{stage.status === "running" && stage.message && <span>{stage.message}</span>}{stage.detail && <small>{stage.detail}</small>}</div>
+        {stage.progress !== null && stage.status !== "skipped" && <span className="stage-progress">{stage.progress}%</span>}
+      </div>)}
+    </div>
+    <button className="activity-toggle" type="button" onClick={onToggle} aria-expanded={showActivity}>{showActivity ? "Hide activity details" : "View activity details"}<span>{showActivity ? "−" : "+"}</span></button>
+    {showActivity && <div className="activity-log">{activity.length ? activity.map((event, index) => <div key={`${event.timestamp}-${index}`}><time>{new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time><span>{event.message || event.event.replaceAll("_", " ")}</span></div>) : <span>No activity recorded yet.</span>}</div>}
+  </section>;
+}
 
 function SummaryAudio({ videoId }: { videoId: string }) {
   const [failed, setFailed] = useState(false);

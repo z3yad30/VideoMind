@@ -6,7 +6,32 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator
 from backend.app.core.config import settings
 
 
-VideoStatus = Literal["queued", "downloading", "extracting_audio", "transcribing", "indexing", "completed", "failed"]
+VideoStatus = Literal["queued", "validating", "downloading", "extracting_audio", "detecting_language", "transcribing", "building_transcript", "chunking", "embedding", "indexing", "summarizing", "generating_summary_audio", "completed", "failed"]
+StageStatus = Literal["pending", "running", "completed", "failed", "skipped"]
+
+
+class ProcessingStageResponse(BaseModel):
+    id: str
+    display_name: str
+    status: StageStatus
+    progress: int | None = None
+    message: str | None = None
+    detail: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error: str | None = None
+
+
+class ProcessingEventResponse(BaseModel):
+    event: str
+    video_id: str
+    stage: str | None = None
+    status: str
+    progress: int | None = None
+    message: str | None = None
+    detail: str | None = None
+    timestamp: datetime
+    stages: list[ProcessingStageResponse] | None = None
 
 
 class VideoJobResponse(BaseModel):
@@ -17,6 +42,7 @@ class VideoJobResponse(BaseModel):
 class VideoStatusResponse(VideoJobResponse):
     error: str | None = None
     updated_at: datetime
+    stages: list[ProcessingStageResponse] = Field(default_factory=list)
 
 
 class YouTubeRequest(BaseModel):

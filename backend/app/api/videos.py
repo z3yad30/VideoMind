@@ -1,9 +1,11 @@
+import asyncio
+import json
 from pathlib import Path
 import re
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.app.core.config import settings
 from backend.app.schemas.videos import (
@@ -13,6 +15,7 @@ from backend.app.schemas.videos import (
     TranscriptResponse,
     VideoJobResponse,
     VideoStatusResponse,
+    ProcessingEventResponse,
     VoiceQuestionResponse,
     YouTubeRequest,
 )
@@ -56,7 +59,28 @@ async def get_video_status(video_id: str) -> VideoStatusResponse:
     job = video_service.get_job(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
-    return VideoStatusResponse(video_id=job.video_id, status=job.status, error=job.error, updated_at=job.updated_at)
+    return VideoStatusResponse(video_id=job.video_id, status=job.status, error=job.error, updated_at=job.updated_at, stages=job.stages or [])
+
+
+@router.get("/{video_id}/events")
+async def video_events(video_id: str) -> StreamingResponse:
+    if video_service.get_job(video_id) is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    async def stream():
+        sent = 0
+        while True:
+            events = video_service.get_events(video_id)
+            for event in events[sent:]:
+                sent += 1
+                payload = ProcessingEventResponse(**event).model_dump(mode="json")
+                yield f"event: {payload['event']}\ndata: {json.dumps(payload)}\n\n"
+            job = video_service.get_job(video_id)
+            if job and job.status in {"completed", "failed"} and sent >= len(events):
+                return
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @router.get("/{video_id}/transcript", response_model=TranscriptResponse)

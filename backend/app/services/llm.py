@@ -141,7 +141,14 @@ class VideoAIService:
 
     def index_and_summarize(self, video_id: str) -> None:
         chunks = self._rag().index_transcript(video_id)
-        summary = self.llm.summarize_hierarchically([str(chunk["text"]) for chunk in chunks])
+        summary = self.generate_summary(chunks)
+        self.save_summary(video_id, summary)
+        self.generate_summary_audio(video_id, summary)
+
+    def generate_summary(self, chunks: list[dict[str, object]]) -> dict[str, str]:
+        return self.llm.summarize_hierarchically([str(chunk["text"]) for chunk in chunks])
+
+    def save_summary(self, video_id: str, summary: dict[str, str]) -> None:
         self.summary_dir.mkdir(parents=True, exist_ok=True)
         summary_path = self.summary_dir / f"{video_id}.json"
         descriptor, temporary_name = tempfile.mkstemp(prefix=f"{video_id}-", suffix=".json.tmp", dir=self.summary_dir)
@@ -152,6 +159,8 @@ class VideoAIService:
             temporary_path.replace(summary_path)
         finally:
             temporary_path.unlink(missing_ok=True)
+
+    def generate_summary_audio(self, video_id: str, summary: dict[str, str]) -> None:
         summary_text = "\n".join(f"{field}: {summary[field]}" for field in SUMMARY_FIELDS if summary[field])
         (self.tts or Pyttsx3TTSService()).synthesize(summary_text, self.audio_dir / f"{video_id}.wav")
 
