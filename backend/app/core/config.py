@@ -14,7 +14,7 @@ class Settings:
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
     groq_model: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
-    asr_model: str = os.getenv("ASR_MODEL", "large-v3")
+    asr_model: str = os.getenv("ASR_MODEL", "base")
     asr_device: str = os.getenv("ASR_DEVICE", "cpu")
     asr_compute_type: str = os.getenv("ASR_COMPUTE_TYPE", "int8")
     max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))

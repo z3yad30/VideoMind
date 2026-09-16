@@ -54,12 +54,15 @@ class MediaService:
         except ImportError as exc:
             raise MediaProcessingError("yt-dlp is not installed") from exc
         options = {
-            "format": "bestvideo*+bestaudio/best",
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             "outtmpl": str(output_dir / "source.%(ext)s"),
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
             "socket_timeout": settings.subprocess_timeout_seconds,
+            "retries": 3,
+            "fragment_retries": 3,
+            "continuedl": True,
             "max_filesize": settings.max_upload_bytes,
         }
         try:

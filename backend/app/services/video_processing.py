@@ -44,6 +44,7 @@ class VideoProcessingService:
         self.media = media or MediaService()
         self.asr = asr
         self.ai = ai
+        self._asr_lock = threading.Lock()
         self._jobs: dict[str, VideoJob] = {}
         self._events: dict[str, list[dict[str, object]]] = {}
         self._lock = threading.Lock()
@@ -82,7 +83,7 @@ class VideoProcessingService:
                 self._stage(video_id, "extracting_audio", "completed", "Audio extracted")
                 self._stage(video_id, "detecting_language", "skipped", "Language detection is provided by transcription")
                 self._stage(video_id, "transcribing", "running", "Transcribing audio", detail="Processing audio segments")
-                asr = self.asr or FasterWhisperASRService()
+                asr = self._get_asr()
                 segments = asr.transcribe(audio_path)
                 if not segments:
                     raise MediaProcessingError("Transcription produced no speech segments")
@@ -118,6 +119,16 @@ class VideoProcessingService:
         finally:
             if not source_url:
                 media_path.unlink(missing_ok=True)
+
+    def _get_asr(self) -> ASRService:
+        if self.asr is not None:
+            return self.asr
+        with self._asr_lock:
+            if self.asr is None:
+                logger.info("Loading ASR model '%s' on %s", settings.asr_model, settings.asr_device)
+                self.asr = FasterWhisperASRService()
+                logger.info("ASR model '%s' loaded", settings.asr_model)
+            return self.asr
 
     def get_transcript(self, video_id: str) -> list[dict[str, object]] | None:
         path = settings.project_root / "data" / "transcripts" / f"{video_id}.json"

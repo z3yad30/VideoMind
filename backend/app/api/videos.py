@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import re
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -29,11 +29,18 @@ media_service = MediaService()
 ai_service = VideoAIService()
 video_service = VideoProcessingService(media=media_service, ai=ai_service)
 voice_service = VoiceQuestionService(ai=ai_service, media=media_service)
+_processing_tasks: set[asyncio.Task[None]] = set()
 _ARTIFACT_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
+def _start_processing(video_id: str, media_path: Path, source_url: str | None = None) -> None:
+    task = asyncio.create_task(asyncio.to_thread(video_service.process, video_id, media_path, source_url))
+    _processing_tasks.add(task)
+    task.add_done_callback(_processing_tasks.discard)
+
+
 @router.post("/upload", response_model=VideoJobResponse, status_code=status.HTTP_202_ACCEPTED)
-async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = File(...)) -> VideoJobResponse:
+async def upload_video(file: UploadFile = File(...)) -> VideoJobResponse:
     try:
         suffix = media_service.validate_filename(file.filename)
         video_id = video_service.create_job()
@@ -43,14 +50,14 @@ async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = Fil
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         await file.close()
-    background_tasks.add_task(video_service.process, video_id, source_path)
+    _start_processing(video_id, source_path)
     return VideoJobResponse(video_id=video_id, status="queued")
 
 
 @router.post("/youtube", response_model=VideoJobResponse, status_code=status.HTTP_202_ACCEPTED)
-async def process_youtube(request: YouTubeRequest, background_tasks: BackgroundTasks) -> VideoJobResponse:
+async def process_youtube(request: YouTubeRequest) -> VideoJobResponse:
     video_id = video_service.create_job()
-    background_tasks.add_task(video_service.process, video_id, Path(), str(request.url))
+    _start_processing(video_id, Path(), str(request.url))
     return VideoJobResponse(video_id=video_id, status="queued")
 
 

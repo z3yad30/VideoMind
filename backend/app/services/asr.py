@@ -1,8 +1,11 @@
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Protocol
 
 from backend.app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -26,5 +29,8 @@ class FasterWhisperASRService:
         self._model = WhisperModel(model_name, device=device, compute_type=compute_type)
 
     def transcribe(self, audio_path: Path) -> list[ASRSegment]:
+        logger.info("Starting transcription for %s", audio_path.name)
         segments, _ = self._model.transcribe(str(audio_path))
-        return [ASRSegment(segment.text, float(segment.start), float(segment.end)) for segment in segments if segment.text and segment.text.strip()]
+        transcript = [ASRSegment(segment.text, float(segment.start), float(segment.end)) for segment in segments if segment.text and segment.text.strip()]
+        logger.info("Transcription finished: %s segments", len(transcript))
+        return transcript
