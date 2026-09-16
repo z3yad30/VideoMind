@@ -9,3 +9,8 @@ configure_logging()
 app = FastAPI(title="AI Video Assistant", version="0.1.0")
 app.include_router(health_router)
 app.include_router(videos_router)
+
+
+@app.get("/")
+def root() -> dict[str, str]:
+	return {"name": "VideoMind API", "status": "ok", "health": "/health"}
