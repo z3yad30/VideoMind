@@ -50,3 +50,8 @@ class QuestionSource(BaseModel):
 class QuestionResponse(BaseModel):
     answer: str
     sources: list[QuestionSource]
+
+
+class VoiceQuestionResponse(QuestionResponse):
+    transcribed_question: str
+    audio_answer_location: str

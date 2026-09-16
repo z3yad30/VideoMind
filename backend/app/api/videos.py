@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 
 from backend.app.core.config import settings
 from backend.app.schemas.videos import (
@@ -10,16 +11,19 @@ from backend.app.schemas.videos import (
     TranscriptResponse,
     VideoJobResponse,
     VideoStatusResponse,
+    VoiceQuestionResponse,
     YouTubeRequest,
 )
 from backend.app.services.llm import VideoAIService
 from backend.app.services.media import MediaProcessingError, MediaService
 from backend.app.services.video_processing import VideoProcessingService
+from backend.app.services.voice import VoiceQuestionService
 
 router = APIRouter(prefix="/videos", tags=["videos"])
 media_service = MediaService()
 ai_service = VideoAIService()
 video_service = VideoProcessingService(media=media_service, ai=ai_service)
+voice_service = VoiceQuestionService(ai=ai_service, media=media_service)
 
 
 @router.post("/upload", response_model=VideoJobResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -72,6 +76,16 @@ async def get_summary(video_id: str) -> SummaryResponse:
     return SummaryResponse(video_id=video_id, summary=summary)
 
 
+@router.get("/{video_id}/summary/audio")
+async def get_summary_audio(video_id: str) -> FileResponse:
+    if video_service.get_job(video_id) is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    audio_path = ai_service.get_summary_audio_path(video_id)
+    if audio_path is None:
+        raise HTTPException(status_code=404, detail="Summary audio is not ready")
+    return FileResponse(audio_path, media_type="audio/wav", filename=f"{video_id}-summary.wav")
+
+
 @router.post("/{video_id}/question", response_model=QuestionResponse)
 async def ask_question(video_id: str, request: QuestionRequest) -> QuestionResponse:
     if video_service.get_job(video_id) is None:
@@ -82,3 +96,31 @@ async def ask_question(video_id: str, request: QuestionRequest) -> QuestionRespo
         return QuestionResponse(**ai_service.answer_question(video_id, request.question))
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/{video_id}/voice-question", response_model=VoiceQuestionResponse)
+async def ask_voice_question(video_id: str, file: UploadFile = File(...)) -> VoiceQuestionResponse:
+    if video_service.get_job(video_id) is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    try:
+        result = voice_service.answer(video_id, file)
+        return VoiceQuestionResponse(
+            transcribed_question=str(result["transcribed_question"]),
+            answer=str(result["answer"]),
+            sources=result["sources"],
+            audio_answer_location=f"/videos/{video_id}/answers/{result['answer_id']}/audio",
+        )
+    except (ValueError, MediaProcessingError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    finally:
+        await file.close()
+
+
+@router.get("/{video_id}/answers/{answer_id}/audio")
+async def get_voice_answer_audio(video_id: str, answer_id: str) -> FileResponse:
+    audio_path = voice_service.audio_dir / video_id / f"{answer_id}.wav"
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="Answer audio not found")
+    return FileResponse(audio_path, media_type="audio/wav", filename=f"{answer_id}.wav")

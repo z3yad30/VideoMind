@@ -2,7 +2,7 @@
 
 AI Video Assistant is a planned production-quality MVP for uploading media or processing an authorized YouTube URL, transcribing it, generating a grounded summary, and answering text or voice questions about that specific video.
 
-This repository is being built incrementally. Phase 4 adds Groq-backed hierarchical summaries and grounded video question answering. TTS and the frontend remain out of scope.
+This repository is being built incrementally. Phase 5 adds local Windows TTS and voice questions; the frontend remains out of scope.
 
 ## Architecture
 
@@ -182,4 +182,12 @@ Completed in Phase 4:
 - Added `GET /videos/{video_id}/summary` and grounded `POST /videos/{video_id}/question` with timestamp sources.
 - Added mocked LLM tests that run without a real Groq API key or network access.
 
-TTS remains intentionally deferred.
+Completed in Phase 5:
+
+- Added a replaceable TTS abstraction with a local `pyttsx3` adapter using the Windows SAPI voice installed on the host.
+- Added WAV audio generation for automatic summaries and grounded answers.
+- Added `POST /videos/{video_id}/voice-question` with multipart microphone audio, faster-whisper transcription, existing video-scoped RAG, and a voice answer location.
+- Added summary and answer audio download routes.
+- Voice question audio and transcripts are temporary/query-only artifacts and are never indexed into ChromaDB.
+
+The initial TTS adapter depends on `pyttsx3` and an installed Windows SAPI voice. It is selected because it runs locally without API credentials or network access. A different provider can be supplied through the `TTSService` protocol; hosts without a usable SAPI voice should provide another adapter rather than changing the RAG pipeline.

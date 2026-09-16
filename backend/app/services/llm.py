@@ -4,6 +4,7 @@ from typing import Any, Protocol
 
 from backend.app.core.config import settings
 from backend.app.services.rag import TranscriptRAGService
+from backend.app.services.tts import Pyttsx3TTSService, TTSService
 
 
 SUMMARY_FIELDS = (
@@ -109,10 +110,14 @@ class VideoAIService:
         llm: GroqLLMService | None = None,
         rag: TranscriptRAGService | None = None,
         summary_dir: Path | None = None,
+        tts: TTSService | None = None,
+        audio_dir: Path | None = None,
     ) -> None:
         self.llm = llm or GroqLLMService()
         self.rag = rag
         self.summary_dir = summary_dir or settings.project_root / "data" / "summaries"
+        self.tts = tts
+        self.audio_dir = audio_dir or settings.project_root / "data" / "audio" / "summaries"
 
     def _rag(self) -> TranscriptRAGService:
         if self.rag is None:
@@ -126,6 +131,8 @@ class VideoAIService:
         (self.summary_dir / f"{video_id}.json").write_text(
             json.dumps({"video_id": video_id, "summary": summary}, indent=2), encoding="utf-8"
         )
+        summary_text = "\n".join(f"{field}: {summary[field]}" for field in SUMMARY_FIELDS if summary[field])
+        (self.tts or Pyttsx3TTSService()).synthesize(summary_text, self.audio_dir / f"{video_id}.wav")
 
     def get_summary(self, video_id: str) -> dict[str, str] | None:
         path = self.summary_dir / f"{video_id}.json"
@@ -135,6 +142,10 @@ class VideoAIService:
             return json.loads(path.read_text(encoding="utf-8"))["summary"]
         except (OSError, KeyError, TypeError, json.JSONDecodeError):
             return None
+
+    def get_summary_audio_path(self, video_id: str) -> Path | None:
+        path = self.audio_dir / f"{video_id}.wav"
+        return path if path.exists() else None
 
     def answer_question(self, video_id: str, question: str, top_k: int = 5) -> dict[str, object]:
         chunks = self._rag().retrieve_relevant_chunks(video_id, question, top_k)
