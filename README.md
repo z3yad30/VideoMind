@@ -98,7 +98,17 @@ uvicorn backend.app.main:app --reload
 
 ## Running the Frontend
 
-The frontend will be added in a later phase. Its setup and development command will be documented here when its package manifest exists.
+From the project root in PowerShell:
+
+```powershell
+Set-Location frontend
+npm install
+npm run dev
+```
+
+The Vite development server runs at `http://localhost:5173` and proxies `/api` requests to the backend at `http://127.0.0.1:8000`. Start the backend separately before using upload, YouTube processing, transcript, summary, or question workflows.
+
+The Python virtual environment installs backend dependencies from `requirements.txt`. Frontend dependencies cannot be installed into that environment because React and Vite are Node/npm packages. You install them once with `npm install` inside `frontend`; they do not need to be installed again unless `frontend/package.json` changes or `node_modules` is removed.
 
 ## API Plan
 
