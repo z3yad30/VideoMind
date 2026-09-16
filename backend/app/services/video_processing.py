@@ -9,6 +9,7 @@ from pathlib import Path
 from backend.app.core.config import settings
 from backend.app.services.asr import ASRService, FasterWhisperASRService
 from backend.app.services.media import MediaProcessingError, MediaService, temporary_directory
+from backend.app.services.llm import VideoAIService
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +23,10 @@ class VideoJob:
 
 
 class VideoProcessingService:
-    def __init__(self, media: MediaService | None = None, asr: ASRService | None = None) -> None:
+    def __init__(self, media: MediaService | None = None, asr: ASRService | None = None, ai: VideoAIService | None = None) -> None:
         self.media = media or MediaService()
         self.asr = asr
+        self.ai = ai
         self._jobs: dict[str, VideoJob] = {}
         self._lock = threading.Lock()
 
@@ -51,6 +53,9 @@ class VideoProcessingService:
                 if not segments:
                     raise MediaProcessingError("Transcription produced no speech segments")
                 self._write_transcript(video_id, segments)
+                if self.ai is not None:
+                    self._set_job(video_id, "indexing")
+                    self.ai.index_and_summarize(video_id)
             self._set_job(video_id, "completed")
         except Exception as exc:
             logger.exception("Video processing failed for %s", video_id)

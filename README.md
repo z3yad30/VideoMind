@@ -2,7 +2,7 @@
 
 AI Video Assistant is a planned production-quality MVP for uploading media or processing an authorized YouTube URL, transcribing it, generating a grounded summary, and answering text or voice questions about that specific video.
 
-This repository is being built incrementally. Phase 3 implements backend media ingestion, timestamped ASR, transcript chunking, local embeddings, ChromaDB retrieval, and video-scoped RAG context. TTS, summaries, and the frontend remain out of scope.
+This repository is being built incrementally. Phase 4 adds Groq-backed hierarchical summaries and grounded video question answering. TTS and the frontend remain out of scope.
 
 ## Architecture
 
@@ -175,4 +175,11 @@ Completed in Phase 3:
 - Added video-scoped similarity retrieval and timestamped RAG context construction.
 - Added tests for collection isolation, metadata persistence, relevance, and empty collections.
 
-TTS and LLM summaries are intentionally deferred to later phases.
+Completed in Phase 4:
+
+- Added lazy Groq client initialization using `GROQ_API_KEY` and `GROQ_MODEL`, defaulting to `openai/gpt-oss-120b`.
+- Added automatic transcript indexing and structured hierarchical summaries under `data/summaries/`.
+- Added `GET /videos/{video_id}/summary` and grounded `POST /videos/{video_id}/question` with timestamp sources.
+- Added mocked LLM tests that run without a real Groq API key or network access.
+
+TTS remains intentionally deferred.

@@ -3,13 +3,23 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile, status
 
 from backend.app.core.config import settings
-from backend.app.schemas.videos import TranscriptResponse, VideoJobResponse, VideoStatusResponse, YouTubeRequest
+from backend.app.schemas.videos import (
+    QuestionRequest,
+    QuestionResponse,
+    SummaryResponse,
+    TranscriptResponse,
+    VideoJobResponse,
+    VideoStatusResponse,
+    YouTubeRequest,
+)
+from backend.app.services.llm import VideoAIService
 from backend.app.services.media import MediaProcessingError, MediaService
 from backend.app.services.video_processing import VideoProcessingService
 
 router = APIRouter(prefix="/videos", tags=["videos"])
 media_service = MediaService()
-video_service = VideoProcessingService(media=media_service)
+ai_service = VideoAIService()
+video_service = VideoProcessingService(media=media_service, ai=ai_service)
 
 
 @router.post("/upload", response_model=VideoJobResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -50,3 +60,25 @@ async def get_transcript(video_id: str) -> TranscriptResponse:
     if segments is None:
         raise HTTPException(status_code=409, detail="Transcript is not ready")
     return TranscriptResponse(video_id=video_id, segments=segments)
+
+
+@router.get("/{video_id}/summary", response_model=SummaryResponse)
+async def get_summary(video_id: str) -> SummaryResponse:
+    if video_service.get_job(video_id) is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    summary = ai_service.get_summary(video_id)
+    if summary is None:
+        raise HTTPException(status_code=409, detail="Summary is not ready")
+    return SummaryResponse(video_id=video_id, summary=summary)
+
+
+@router.post("/{video_id}/question", response_model=QuestionResponse)
+async def ask_question(video_id: str, request: QuestionRequest) -> QuestionResponse:
+    if video_service.get_job(video_id) is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="Question must not be empty")
+    try:
+        return QuestionResponse(**ai_service.answer_question(video_id, request.question))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
