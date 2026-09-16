@@ -38,7 +38,12 @@ class VoiceQuestionService:
         result = self.ai.answer_question(video_id, question)
         answer_id = uuid.uuid4().hex
         audio_path = self.audio_dir / video_id / f"{answer_id}.wav"
-        (self.tts or Pyttsx3TTSService()).synthesize(str(result["answer"]), audio_path)
+        try:
+            (self.tts or Pyttsx3TTSService()).synthesize(str(result["answer"]), audio_path)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError("TTS synthesis failed") from exc
         return {
             "transcribed_question": question,
             "answer": result["answer"],

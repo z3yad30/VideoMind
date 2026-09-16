@@ -40,11 +40,16 @@ class GroqLLMService:
         return self._client
 
     def complete(self, prompt: str) -> str:
-        response = self.client.create(
-            model=self.model,
-            temperature=0.1,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            response = self.client.create(
+                model=self.model,
+                temperature=0.1,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError("LLM request failed") from exc
         return response.choices[0].message.content.strip()
 
     def summarize(self, text: str) -> dict[str, str]:
@@ -79,6 +84,8 @@ TRANSCRIPT:
         return partials[0]
 
     def answer(self, question: str, chunks: list[dict[str, object]]) -> str:
+        if not chunks:
+            return "The answer cannot be determined from the video context."
         context = "\n\n".join(
             f"[{item['metadata']['start']}-{item['metadata']['end']}] {item['text']}"
             for item in chunks

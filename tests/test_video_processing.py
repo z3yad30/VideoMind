@@ -1,6 +1,8 @@
 import sys
 import types
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -9,6 +11,8 @@ from backend.app.main import app
 from backend.app.services.asr import ASRSegment
 from backend.app.services.media import MediaService
 from backend.app.services.video_processing import VideoProcessingService
+import backend.app.api.videos as videos_api
+import backend.app.services.media as media_module
 
 
 class FakeMedia:
@@ -64,6 +68,109 @@ async def test_upload_rejects_unsupported_media() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/videos/upload", files={"file": ("notes.txt", b"text", "text/plain")})
     assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_question_is_rejected_until_processing_completes(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Job:
+        status = "transcribing"
+
+    class AI:
+        def answer_question(self, video_id: str, question: str):
+            raise AssertionError("LLM must not be called before processing completes")
+
+    monkeypatch.setattr(videos_api, "video_service", type("Service", (), {"get_job": lambda self, _: Job()})())
+    monkeypatch.setattr(videos_api, "ai_service", AI())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/videos/video-1/question", json={"question": "What happened?"})
+
+    assert response.status_code == 409
+
+
+def test_upload_rejects_huge_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(media_module, "settings", SimpleNamespace(max_upload_bytes=3))
+    upload = SimpleNamespace(file=BytesIO(b"1234"))
+
+    with pytest.raises(Exception, match="maximum allowed size"):
+        MediaService().save_upload(upload, tmp_path / "too-large.mp4")
+
+
+def test_missing_ffmpeg_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def missing_ffmpeg(*args, **kwargs):
+        raise OSError("not found")
+
+    monkeypatch.setattr(media_module.subprocess, "run", missing_ffmpeg)
+
+    with pytest.raises(Exception, match="FFmpeg is not installed"):
+        MediaService().extract_audio(tmp_path / "broken.mp4", tmp_path / "audio")
+
+
+def test_corrupt_media_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        media_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="invalid data"),
+    )
+
+    with pytest.raises(Exception, match="Audio extraction failed: invalid data"):
+        MediaService().extract_audio(tmp_path / "broken.mp4", tmp_path / "audio")
+
+
+@pytest.mark.asyncio
+async def test_invalid_youtube_url_and_malformed_question_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        videos_api,
+        "video_service",
+        SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")),
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        invalid_url = await client.post("/videos/youtube", json={"url": "not-a-url"})
+        malformed_question = await client.post("/videos/video-1/question", json={"question": 12})
+
+    assert invalid_url.status_code == 422
+    assert malformed_question.status_code == 422
+
+
+def test_inaccessible_youtube_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class FailingDownloader:
+        def __init__(self, options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def download(self, urls):
+            raise RuntimeError("private video")
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FailingDownloader))
+
+    with pytest.raises(Exception, match="YouTube download failed: private video"):
+        MediaService().download_youtube("https://youtube.com/watch?v=private", tmp_path)
+
+
+def test_concurrent_jobs_keep_independent_state(tmp_path: Path) -> None:
+    class ConcurrentMedia(FakeMedia):
+        pass
+
+    service = VideoProcessingService(media=ConcurrentMedia(), asr=FakeASR())
+    sources = [tmp_path / f"source-{index}.wav" for index in range(2)]
+    video_ids = [service.create_job() for _ in sources]
+    for source in sources:
+        source.write_bytes(b"source")
+
+    import threading
+
+    threads = [threading.Thread(target=service.process, args=(video_id, source)) for video_id, source in zip(video_ids, sources)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert [service.get_job(video_id).status for video_id in video_ids] == ["completed", "completed"]
 
 
 def test_youtube_downloader_uses_single_video_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

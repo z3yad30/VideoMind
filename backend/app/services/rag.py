@@ -136,17 +136,18 @@ class TranscriptRAGService:
     def retrieve_relevant_chunks(self, video_id: str, question: str, top_k: int = 5) -> list[dict[str, object]]:
         if not question or top_k < 1:
             return []
-        try:
-            collection = self.client.get_collection(self.collection_name(video_id))
-            result = collection.query(query_embeddings=embedding_rows(self.embedding_model.encode([question])), n_results=top_k)
-        except Exception:
+        transcript_path = self.transcript_dir / f"{video_id}.json"
+        if not transcript_path.exists():
             return []
+        collection = self.client.get_collection(self.collection_name(video_id))
+        result = collection.query(query_embeddings=embedding_rows(self.embedding_model.encode([question])), n_results=top_k)
         documents = (result.get("documents") or [[]])[0]
         metadatas = (result.get("metadatas") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]
         return [
             {"text": text, "metadata": metadata, "distance": distances[index] if index < len(distances) else None}
             for index, (text, metadata) in enumerate(zip(documents, metadatas))
+            if isinstance(metadata, dict) and metadata.get("video_id") == video_id
         ]
 
     def build_rag_context(self, video_id: str, question: str, top_k: int = 5) -> str:

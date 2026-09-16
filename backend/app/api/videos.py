@@ -88,8 +88,11 @@ async def get_summary_audio(video_id: str) -> FileResponse:
 
 @router.post("/{video_id}/question", response_model=QuestionResponse)
 async def ask_question(video_id: str, request: QuestionRequest) -> QuestionResponse:
-    if video_service.get_job(video_id) is None:
+    job = video_service.get_job(video_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
+    if job.status != "completed":
+        raise HTTPException(status_code=409, detail="Video processing is not complete")
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question must not be empty")
     try:
@@ -100,8 +103,11 @@ async def ask_question(video_id: str, request: QuestionRequest) -> QuestionRespo
 
 @router.post("/{video_id}/voice-question", response_model=VoiceQuestionResponse)
 async def ask_voice_question(video_id: str, file: UploadFile = File(...)) -> VoiceQuestionResponse:
-    if video_service.get_job(video_id) is None:
+    job = video_service.get_job(video_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
+    if job.status != "completed":
+        raise HTTPException(status_code=409, detail="Video processing is not complete")
     try:
         result = voice_service.answer(video_id, file)
         return VoiceQuestionResponse(

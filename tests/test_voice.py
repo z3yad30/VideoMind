@@ -1,3 +1,4 @@
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,7 +53,11 @@ async def test_voice_question_runs_asr_rag_and_tts_without_indexing(monkeypatch:
         ai=ai, media=MediaService(), asr=FakeASR(), tts=tts, audio_dir=tmp_path / "answers"
     )
     monkeypatch.setattr(videos_api, "voice_service", service)
-    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda video_id: object()))
+    monkeypatch.setattr(
+        videos_api,
+        "video_service",
+        SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")),
+    )
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
@@ -89,3 +94,16 @@ def test_summary_is_synthesized_with_replaceable_tts(tmp_path: Path) -> None:
 
     assert service.get_summary_audio_path("video-1") == tmp_path / "audio" / "video-1.wav"
     assert tts.calls[0][0].startswith("Overview: Overview")
+
+
+def test_tts_failure_is_normalized(tmp_path: Path) -> None:
+    class BrokenTTS:
+        def synthesize(self, text: str, output_path: Path) -> Path:
+            raise OSError("audio device unavailable")
+
+    service = VoiceQuestionService(
+        ai=FakeAI(), media=MediaService(), asr=FakeASR(), tts=BrokenTTS(), audio_dir=tmp_path / "answers"
+    )
+
+    with pytest.raises(RuntimeError, match="TTS synthesis failed"):
+        service.answer("video-1", SimpleNamespace(filename="question.wav", file=BytesIO(b"audio")))

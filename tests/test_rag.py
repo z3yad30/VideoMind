@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from backend.app.services.rag import TranscriptRAGService
 
 
@@ -87,3 +89,48 @@ def test_missing_or_empty_collections_are_handled_gracefully(tmp_path: Path) -> 
     write_transcript(tmp_path, "empty", [])
     assert service.index_transcript("empty") == []
     assert service.retrieve_relevant_chunks("empty", "anything") == []
+
+
+def test_retrieval_rejects_chunks_from_another_video(tmp_path: Path) -> None:
+    class ContaminatedCollection:
+        def query(self, **kwargs):
+            return {
+                "documents": [["Video B secret"]],
+                "metadatas": [[{"video_id": "b", "start": 0.0, "end": 1.0}]],
+                "distances": [[0.1]],
+            }
+
+    class ContaminatedClient:
+        def get_collection(self, name):
+            assert name == "video_a"
+            return ContaminatedCollection()
+
+    service = TranscriptRAGService(
+        transcript_dir=tmp_path / "transcripts",
+        chroma_dir=tmp_path / "chroma",
+        embedding_model=FakeEmbeddings(),
+        chroma_client=ContaminatedClient(),
+    )
+
+    assert service.retrieve_relevant_chunks("a", "anything") == []
+
+
+def test_retrieval_surfaces_backend_failures(tmp_path: Path) -> None:
+    class BrokenCollection:
+        def query(self, **kwargs):
+            raise RuntimeError("embedding backend unavailable")
+
+    class BrokenClient:
+        def get_collection(self, name):
+            return BrokenCollection()
+
+    service = TranscriptRAGService(
+        transcript_dir=tmp_path / "transcripts",
+        chroma_dir=tmp_path / "chroma",
+        embedding_model=FakeEmbeddings(),
+        chroma_client=BrokenClient(),
+    )
+    write_transcript(tmp_path, "a", [{"text": "indexed transcript", "start": 0, "end": 1}])
+
+    with pytest.raises(RuntimeError, match="embedding backend unavailable"):
+        service.retrieve_relevant_chunks("a", "anything")
