@@ -19,6 +19,8 @@ class Settings:
     asr_compute_type: str = os.getenv("ASR_COMPUTE_TYPE", "int8")
     max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
     ffmpeg_binary: str = os.getenv("FFMPEG_BINARY", "ffmpeg")
+    subprocess_timeout_seconds: int = int(os.getenv("SUBPROCESS_TIMEOUT_SECONDS", "1800"))
+    max_question_characters: int = int(os.getenv("MAX_QUESTION_CHARACTERS", "2000"))
 
 
 settings = Settings()

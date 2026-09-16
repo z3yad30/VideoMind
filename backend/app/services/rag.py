@@ -103,7 +103,7 @@ class TranscriptRAGService:
 
     @staticmethod
     def collection_name(video_id: str) -> str:
-        if not video_id or video_id.strip() != video_id:
+        if not video_id or video_id.strip() != video_id or len(video_id) > 128:
             raise ValueError("video_id must be a non-empty string")
         return f"video_{video_id}"
 
@@ -121,6 +121,9 @@ class TranscriptRAGService:
 
         chunks = chunk_transcript(segments, self.max_chunk_characters)
         collection = self.client.get_or_create_collection(self.collection_name(video_id))
+        existing = collection.get().get("ids", [])
+        if existing:
+            collection.delete(ids=existing)
         if not chunks:
             return []
         source = str(transcript_path)

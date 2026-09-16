@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
+
+from backend.app.core.config import settings
 
 
 VideoStatus = Literal["queued", "downloading", "extracting_audio", "transcribing", "indexing", "completed", "failed"]
@@ -19,6 +21,13 @@ class VideoStatusResponse(VideoJobResponse):
 
 class YouTubeRequest(BaseModel):
     url: HttpUrl
+
+    @field_validator("url")
+    @classmethod
+    def validate_youtube_host(cls, value: HttpUrl) -> HttpUrl:
+        if value.host not in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "music.youtube.com"}:
+            raise ValueError("Only YouTube URLs are supported")
+        return value
 
 
 class TranscriptSegment(BaseModel):
@@ -38,7 +47,7 @@ class SummaryResponse(BaseModel):
 
 
 class QuestionRequest(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=settings.max_question_characters)
 
 
 class QuestionSource(BaseModel):

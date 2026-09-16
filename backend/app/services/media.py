@@ -31,9 +31,17 @@ class MediaService:
         audio_path = output_dir / "audio.wav"
         command = [settings.ffmpeg_binary, "-y", "-i", str(media_path), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(audio_path)]
         try:
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=settings.subprocess_timeout_seconds,
+            )
         except OSError as exc:
             raise MediaProcessingError("FFmpeg is not installed or cannot be started") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise MediaProcessingError("Audio extraction timed out") from exc
         if result.returncode != 0 or not audio_path.exists() or audio_path.stat().st_size == 0:
             detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "unknown FFmpeg error"
             raise MediaProcessingError(f"Audio extraction failed: {detail}")
@@ -45,7 +53,15 @@ class MediaService:
             import yt_dlp
         except ImportError as exc:
             raise MediaProcessingError("yt-dlp is not installed") from exc
-        options = {"format": "bestvideo*+bestaudio/best", "outtmpl": str(output_dir / "source.%(ext)s"), "noplaylist": True, "quiet": True, "no_warnings": True}
+        options = {
+            "format": "bestvideo*+bestaudio/best",
+            "outtmpl": str(output_dir / "source.%(ext)s"),
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "socket_timeout": settings.subprocess_timeout_seconds,
+            "max_filesize": settings.max_upload_bytes,
+        }
         try:
             with yt_dlp.YoutubeDL(options) as downloader:
                 downloader.download([url])

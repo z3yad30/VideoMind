@@ -73,7 +73,12 @@ class VideoProcessingService:
     def _write_transcript(self, video_id: str, segments) -> None:
         path = settings.project_root / "data" / "transcripts" / f"{video_id}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"video_id": video_id, "segments": [asdict(segment) for segment in segments]}, indent=2), encoding="utf-8")
+        temporary_path = path.with_suffix(".json.tmp")
+        temporary_path.write_text(
+            json.dumps({"video_id": video_id, "segments": [asdict(segment) for segment in segments]}, indent=2),
+            encoding="utf-8",
+        )
+        temporary_path.replace(path)
 
     def _set_job(self, video_id: str, status: str, error: str | None = None) -> None:
         with self._lock:

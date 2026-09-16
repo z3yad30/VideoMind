@@ -1,6 +1,8 @@
 from pathlib import Path
+import re
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from backend.app.core.config import settings
@@ -24,6 +26,7 @@ media_service = MediaService()
 ai_service = VideoAIService()
 video_service = VideoProcessingService(media=media_service, ai=ai_service)
 voice_service = VoiceQuestionService(ai=ai_service, media=media_service)
+_ARTIFACT_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
 @router.post("/upload", response_model=VideoJobResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -58,8 +61,11 @@ async def get_video_status(video_id: str) -> VideoStatusResponse:
 
 @router.get("/{video_id}/transcript", response_model=TranscriptResponse)
 async def get_transcript(video_id: str) -> TranscriptResponse:
-    if video_service.get_job(video_id) is None:
+    job = video_service.get_job(video_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
+    if job.status != "completed":
+        raise HTTPException(status_code=409, detail="Transcript is not ready")
     segments = video_service.get_transcript(video_id)
     if segments is None:
         raise HTTPException(status_code=409, detail="Transcript is not ready")
@@ -68,8 +74,11 @@ async def get_transcript(video_id: str) -> TranscriptResponse:
 
 @router.get("/{video_id}/summary", response_model=SummaryResponse)
 async def get_summary(video_id: str) -> SummaryResponse:
-    if video_service.get_job(video_id) is None:
+    job = video_service.get_job(video_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
+    if job.status != "completed":
+        raise HTTPException(status_code=409, detail="Summary is not ready")
     summary = ai_service.get_summary(video_id)
     if summary is None:
         raise HTTPException(status_code=409, detail="Summary is not ready")
@@ -78,8 +87,13 @@ async def get_summary(video_id: str) -> SummaryResponse:
 
 @router.get("/{video_id}/summary/audio")
 async def get_summary_audio(video_id: str) -> FileResponse:
-    if video_service.get_job(video_id) is None:
+    job = video_service.get_job(video_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
+    if job.status != "completed":
+        raise HTTPException(status_code=409, detail="Summary audio is not ready")
+    if not _ARTIFACT_ID.fullmatch(video_id):
+        raise HTTPException(status_code=404, detail="Summary audio not found")
     audio_path = ai_service.get_summary_audio_path(video_id)
     if audio_path is None:
         raise HTTPException(status_code=404, detail="Summary audio is not ready")
@@ -96,7 +110,8 @@ async def ask_question(video_id: str, request: QuestionRequest) -> QuestionRespo
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question must not be empty")
     try:
-        return QuestionResponse(**ai_service.answer_question(video_id, request.question))
+        result = await run_in_threadpool(ai_service.answer_question, video_id, request.question)
+        return QuestionResponse(**result)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -109,7 +124,7 @@ async def ask_voice_question(video_id: str, file: UploadFile = File(...)) -> Voi
     if job.status != "completed":
         raise HTTPException(status_code=409, detail="Video processing is not complete")
     try:
-        result = voice_service.answer(video_id, file)
+        result = await run_in_threadpool(voice_service.answer, video_id, file)
         return VoiceQuestionResponse(
             transcribed_question=str(result["transcribed_question"]),
             answer=str(result["answer"]),
@@ -126,6 +141,9 @@ async def ask_voice_question(video_id: str, file: UploadFile = File(...)) -> Voi
 
 @router.get("/{video_id}/answers/{answer_id}/audio")
 async def get_voice_answer_audio(video_id: str, answer_id: str) -> FileResponse:
+    job = video_service.get_job(video_id)
+    if job is None or job.status != "completed" or not _ARTIFACT_ID.fullmatch(video_id) or not _ARTIFACT_ID.fullmatch(answer_id):
+        raise HTTPException(status_code=404, detail="Answer audio not found")
     audio_path = voice_service.audio_dir / video_id / f"{answer_id}.wav"
     if not audio_path.exists():
         raise HTTPException(status_code=404, detail="Answer audio not found")

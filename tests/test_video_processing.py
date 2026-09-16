@@ -11,6 +11,7 @@ from backend.app.main import app
 from backend.app.services.asr import ASRSegment
 from backend.app.services.media import MediaService
 from backend.app.services.video_processing import VideoProcessingService
+from backend.app.schemas.videos import YouTubeRequest
 import backend.app.api.videos as videos_api
 import backend.app.services.media as media_module
 
@@ -196,3 +197,21 @@ def test_youtube_downloader_uses_single_video_mode(monkeypatch: pytest.MonkeyPat
     assert result == tmp_path / "source.mp4"
     assert calls[0][0] == ["https://www.youtube.com/watch?v=example"]
     assert calls[0][1]["noplaylist"] is True
+
+
+def test_youtube_request_rejects_non_youtube_hosts() -> None:
+    with pytest.raises(Exception, match="Only YouTube URLs are supported"):
+        YouTubeRequest(url="https://example.com/video")
+
+
+@pytest.mark.asyncio
+async def test_audio_artifact_rejects_unsafe_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        videos_api,
+        "video_service",
+        SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")),
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/videos/../../answers/../../audio")
+
+    assert response.status_code in {404, 422}

@@ -1,12 +1,12 @@
-# AI Video Assistant
+# VideoMind
 
-AI Video Assistant is a planned production-quality MVP for uploading media or processing an authorized YouTube URL, transcribing it, generating a grounded summary, and answering text or voice questions about that specific video.
+VideoMind is a local-first MVP for uploading media or processing an authorized YouTube URL, transcribing it, generating a grounded summary, and answering text or voice questions about that specific video.
 
-This repository is being built incrementally. Phase 5 adds local Windows TTS and voice questions; the frontend remains out of scope.
+The backend and Vite frontend are implemented. The current deployment model is a single Windows-hosted process with local filesystem artifacts.
 
 ## Architecture
 
-The planned pipeline is:
+The pipeline is:
 
 1. Upload a video/audio file or submit a YouTube URL.
 2. Download media when needed and extract audio with FFmpeg.
@@ -19,7 +19,7 @@ The planned pipeline is:
 9. Generate summary and answer audio through a replaceable TTS service.
 10. Answer questions by retrieving only from the selected video's collection, then passing retrieved context to Groq.
 
-The backend will use FastAPI and Uvicorn. Route handlers will remain thin; processing, ASR, media, embedding, vector-store, LLM, and TTS responsibilities will live in service modules.
+The backend uses FastAPI and Uvicorn. Route handlers remain thin; processing, ASR, media, embedding, vector-store, LLM, and TTS responsibilities live in service modules.
 
 ## Technologies
 
@@ -85,7 +85,7 @@ GROQ_MODEL=openai/gpt-oss-120b
 
 Never hardcode or commit API keys. `.env` is ignored by Git. Tests must use mocked external services and must not require a Groq key.
 
-The application will load environment variables with `python-dotenv`. ASR, embedding, chunking, retrieval count, storage paths, upload limits, and TTS settings will be configurable through the backend settings module as implementation proceeds.
+The application loads environment variables with `python-dotenv`. ASR, upload limits, subprocess timeouts, question length, and storage paths are configurable through the backend settings module.
 
 ## Running the Backend
 
@@ -108,7 +108,7 @@ npm run dev
 
 The Vite development server runs at `http://localhost:5173` and proxies `/api` requests to the backend at `http://127.0.0.1:8000`. Start the backend separately before using upload, YouTube processing, transcript, summary, or question workflows.
 
-The Python virtual environment installs backend dependencies from `requirements.txt`. Frontend dependencies cannot be installed into that environment because React and Vite are Node/npm packages. You install them once with `npm install` inside `frontend`; they do not need to be installed again unless `frontend/package.json` changes or `node_modules` is removed.
+The Python virtual environment installs backend dependencies from `requirements.txt`. Frontend dependencies cannot be installed into that environment because React and Vite are Node/npm packages. Install them once with `npm install` inside `frontend`; validate the production bundle with `npm run build`.
 
 ## API Plan
 
@@ -157,6 +157,13 @@ The intended command is:
 .\.venv\Scripts\Activate.ps1
 python -m pytest
 ```
+
+## Current limitations
+
+- Job status is in memory and `BackgroundTasks` is process-local. A restart loses status, and multiple workers do not share jobs.
+- There is no authentication, authorization, tenant isolation, rate limiting, or durable job queue. This is not ready for an internet-facing multi-user deployment.
+- ChromaDB, transcripts, summaries, and audio use local filesystem storage. Use a database/object store and isolated vector namespaces for multi-instance deployment.
+- ASR, embeddings, Groq, FFmpeg, and Windows SAPI TTS are blocking and resource-intensive. Production deployment needs bounded worker pools, retries, quotas, and retention cleanup.
 
 ## Troubleshooting
 

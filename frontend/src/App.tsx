@@ -14,6 +14,7 @@ import {
   type Summary,
   type TranscriptSegment,
   type VideoStatus,
+  type VoiceAnswer,
   uploadVideo,
 } from "./api";
 
@@ -285,7 +286,7 @@ function SummaryAudio({ videoId }: { videoId: string }) {
   return <div className="audio-player"><span>Listen to summary</span><audio controls src={resolveMediaUrl(`/videos/${videoId}/summary/audio`)} onError={() => setFailed(true)} /></div>;
 }
 
-function AnswerCard({ answer, onJump, canJump, videoId }: { answer: Answer; onJump: (seconds: number) => void; canJump: boolean; videoId: string }) {
+function AnswerCard({ answer, onJump, canJump, videoId }: { answer: Answer | VoiceAnswer; onJump: (seconds: number) => void; canJump: boolean; videoId: string }) {
   const voiceAudio = "audio_answer_location" in answer ? answer.audio_answer_location : null;
   return <div className="answer-card"><div className="answer-heading"><span>Answer</span>{voiceAudio && <audio controls src={resolveMediaUrl(voiceAudio)} />}</div><p className="answer-text">{answer.answer}</p>{answer.sources.length > 0 && <div className="sources"><span className="sources-label">Sources from the video</span>{answer.sources.map((source, index) => <SourceList key={`${source.start}-${index}`} source={source} onJump={onJump} canJump={canJump} />)}</div>}{answer.sources.length === 0 && <p className="no-sources">No matching timestamp was returned.</p>}<span className="answer-video-id" aria-hidden="true">{videoId}</span></div>;
 }
