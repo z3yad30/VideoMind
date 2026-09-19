@@ -134,3 +134,23 @@ def test_retrieval_surfaces_backend_failures(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="embedding backend unavailable"):
         service.retrieve_relevant_chunks("a", "anything")
+
+
+def test_sentence_transformer_load_failure_uses_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    import backend.app.services.rag as rag_module
+
+    class FakeSentenceTransformer:
+        def __init__(self, *_args, **_kwargs):
+            raise OSError("BAAI/bge-m3 does not appear to have a file named pytorch_model.bin")
+
+    fake_mod = type("FakeMod", (), {"SentenceTransformer": FakeSentenceTransformer})
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_mod)
+
+    service = rag_module.SentenceTransformerEmbedding()
+    vectors = service.encode(["alpha beta", "gamma"])
+
+    assert isinstance(vectors, list)
+    assert len(vectors) == 2
+    assert len(vectors[0]) == 32

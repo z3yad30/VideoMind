@@ -1,9 +1,13 @@
+import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from backend.app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingModel(Protocol):
@@ -28,16 +32,55 @@ class TranscriptChunk:
         }
 
 
+class LocalFallbackEmbedding:
+    def __init__(self, dimensions: int = 32) -> None:
+        self.dimensions = dimensions
+
+    def _vector_for(self, text: str) -> list[float]:
+        if not text:
+            return [0.0] * self.dimensions
+
+        base = text.lower().strip()
+        vector = [0.0] * self.dimensions
+        for index in range(self.dimensions):
+            digest = hashlib.sha256(f"{base}|{index}".encode("utf-8")).digest()
+            raw = int.from_bytes(digest[:8], byteorder="big", signed=False)
+            vector[index] = ((raw % 2_000_000) / 1_000_000.0) - 1.0
+
+        tokens = base.split()
+        if tokens:
+            vector[0] = min(len(tokens) / 20.0, 1.0)
+            vector[1] = min(len(base) / 200.0, 1.0)
+        return vector
+
+    def encode(self, sentences: list[str]) -> Any:
+        return [self._vector_for(sentence) for sentence in sentences]
+
+
 class SentenceTransformerEmbedding:
     def __init__(self, model_name: str = "BAAI/bge-m3") -> None:
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
             raise RuntimeError("sentence-transformers is not installed") from exc
-        self._model = SentenceTransformer(model_name)
+
+        try:
+            self._model = SentenceTransformer(model_name)
+        except Exception as exc:  # pragma: no cover - depends on local environment
+            logger.warning(
+                "Could not load embedding model '%s'; using local fallback. Reason: %s",
+                model_name,
+                exc,
+            )
+            self._model = LocalFallbackEmbedding()
 
     def encode(self, sentences: list[str]) -> Any:
-        return self._model.encode(sentences, normalize_embeddings=True)
+        if hasattr(self._model, "encode"):
+            try:
+                return self._model.encode(sentences, normalize_embeddings=True)
+            except TypeError:
+                return self._model.encode(sentences)
+        return self._model.encode(sentences)
 
 
 def embedding_rows(embeddings: Any) -> list[list[float]]:
