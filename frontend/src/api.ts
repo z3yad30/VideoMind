@@ -2,10 +2,17 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
 export type ProcessingStatus =
   | "queued"
+  | "validating"
   | "downloading"
   | "extracting_audio"
+  | "detecting_language"
   | "transcribing"
+  | "building_transcript"
+  | "chunking"
+  | "embedding"
   | "indexing"
+  | "summarizing"
+  | "generating_summary_audio"
   | "completed"
   | "failed";
 
@@ -20,7 +27,7 @@ export type VideoJob = {
 export type VideoStatus = VideoJob & { error?: string | null; updated_at: string; stages: ProcessingStage[] };
 export type StageStatus = "pending" | "running" | "completed" | "failed" | "skipped";
 export type ProcessingStage = {
-  id: string;
+  id: ProcessingStatus;
   display_name: string;
   status: StageStatus;
   progress: number | null;
@@ -33,7 +40,7 @@ export type ProcessingStage = {
 export type ProcessingEvent = {
   event: string;
   video_id: string;
-  stage: string | null;
+  stage: ProcessingStatus | null;
   status: string;
   progress: number | null;
   message: string | null;

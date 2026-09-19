@@ -89,6 +89,32 @@ async def test_upload_rejects_unsupported_media() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_video_returns_404_for_unknown_video(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda video_id: None))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/videos/unknown-video")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Video not found"
+
+
+@pytest.mark.asyncio
+async def test_get_video_returns_job_for_known_video(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        videos_api,
+        "video_service",
+        SimpleNamespace(get_job=lambda video_id: SimpleNamespace(video_id=video_id, status="transcribing")),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/videos/video-1")
+
+    assert response.status_code == 200
+    assert response.json() == {"video_id": "video-1", "status": "transcribing"}
+
+
+@pytest.mark.asyncio
 async def test_question_is_rejected_until_processing_completes(monkeypatch: pytest.MonkeyPatch) -> None:
     class Job:
         status = "transcribing"

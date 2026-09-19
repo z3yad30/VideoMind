@@ -61,6 +61,14 @@ async def process_youtube(request: YouTubeRequest) -> VideoJobResponse:
     return VideoJobResponse(video_id=video_id, status="queued")
 
 
+@router.get("/{video_id}", response_model=VideoJobResponse)
+async def get_video(video_id: str) -> VideoJobResponse:
+    job = video_service.get_job(video_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    return VideoJobResponse(video_id=job.video_id, status=job.status)
+
+
 @router.get("/{video_id}/status", response_model=VideoStatusResponse)
 async def get_video_status(video_id: str) -> VideoStatusResponse:
     job = video_service.get_job(video_id)
