@@ -306,27 +306,8 @@ export default function App() {
         {videoId && (
           <>
             <div className="results-stack">
-              <div className="video-frame panel">
-                {previewUrl ? <video ref={videoRef} controls src={previewUrl} /> : <div className="unavailable-media"><span className="play-glyph">▶</span><strong>Playback unavailable</strong><span>The original video is not retained by this workspace.</span></div>}
-              </div>
-
               <ProcessingActivity stages={stages} activity={activity} showActivity={showActivity} onToggle={() => setShowActivity((value) => !value)} ready={isReady} expanded={showProcessingDetails} onExpandedToggle={() => setShowProcessingDetails((value) => !value)} transcriptCount={transcript.length} />
               {status?.status === "failed" && <div className="failed-panel panel"><strong>We could not finish this video.</strong><span>Check the source and try again with a different file or link.</span><button className="secondary-button" type="button" onClick={resetWorkspace}>Try another source</button></div>}
-
-              <section className="transcript panel">
-                <div className="panel-heading compact collapsible-heading">
-                  <div><span className="section-kicker">02 / The record</span><h2>Transcript</h2></div>
-                  <div className="section-heading-actions">
-                    {transcript.length > 0 && <span className="count-label">{transcript.length} segments</span>}
-                    <button className="activity-toggle section-toggle" type="button" onClick={() => setShowTranscript((value) => !value)} aria-expanded={showTranscript} aria-controls="transcript-content">
-                      {showTranscript ? "Hide transcript" : "View transcript"}<span>{showTranscript ? "−" : "+"}</span>
-                    </button>
-                  </div>
-                </div>
-                <div id="transcript-content" hidden={!showTranscript}>
-                  {transcript.length ? <div className="transcript-list">{transcript.map((segment, index) => <button className="transcript-row" type="button" key={`${segment.start}-${index}`} onClick={() => jumpTo(segment.start)} disabled={!previewUrl}><span>{formatTime(segment.start)}</span><p>{segment.text}</p></button>)}</div> : <EmptyState text={isReady ? "No transcript is available for this source." : "Your timestamped transcript will appear here when processing finishes."} />}
-                </div>
-              </section>
 
               <section className="summary panel">
                 <div className="panel-heading compact collapsible-heading">
@@ -343,6 +324,25 @@ export default function App() {
               </section>
 
               <section className="ask panel primary-action"><div className="panel-heading compact"><div><span className="section-kicker">04 / Ask the video</span><h2>What do you want to know?</h2></div></div><div className="ask-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={submitOnEnter} disabled={!canAsk || isAsking} placeholder={canAsk ? "Ask about a moment, idea, or detail..." : "Available when processing finishes"} rows={3} /><div className="ask-actions"><span>Enter to ask · Shift + Enter for a new line</span><button className={`mic-button ${isRecording ? "recording" : ""}`} type="button" onClick={() => void toggleRecording()} disabled={!canAsk || isAsking} title={isRecording ? "Stop recording" : "Ask with your microphone"}>{isRecording ? "■" : "●"}</button><button className="ask-button" type="button" onClick={() => void ask()} disabled={!canAsk || !question.trim() || isAsking}>{isAsking ? "Thinking..." : "Ask"}<span>↗</span></button></div></div>{voiceQuestion && <div className="voice-question"><span>Heard you say</span><p>“{voiceQuestion}”</p></div>}{answer && <AnswerCard answer={answer} onJump={jumpTo} canJump={Boolean(previewUrl)} videoId={videoId} />}</section>
+
+              <div className="video-frame panel">
+                {previewUrl ? <video ref={videoRef} controls src={previewUrl} /> : <div className="unavailable-media"><span className="play-glyph">▶</span><strong>Playback unavailable</strong><span>The original video is not retained by this workspace.</span></div>}
+              </div>
+
+              <section className="transcript panel">
+                <div className="panel-heading compact collapsible-heading">
+                  <div><span className="section-kicker">02 / The record</span><h2>Transcript</h2></div>
+                  <div className="section-heading-actions">
+                    {transcript.length > 0 && <span className="count-label">{transcript.length} segments</span>}
+                    <button className="activity-toggle section-toggle" type="button" onClick={() => setShowTranscript((value) => !value)} aria-expanded={showTranscript} aria-controls="transcript-content">
+                      {showTranscript ? "Hide transcript" : "View transcript"}<span>{showTranscript ? "−" : "+"}</span>
+                    </button>
+                  </div>
+                </div>
+                <div id="transcript-content" hidden={!showTranscript}>
+                  {transcript.length ? <div className="transcript-list">{transcript.map((segment, index) => <button className="transcript-row" type="button" key={`${segment.start}-${index}`} onClick={() => jumpTo(segment.start)} disabled={!previewUrl}><span>{formatTime(segment.start)}</span><p>{segment.text}</p></button>)}</div> : <EmptyState text={isReady ? "No transcript is available for this source." : "Your timestamped transcript will appear here when processing finishes."} />}
+                </div>
+              </section>
             </div>
           </>
         )}
