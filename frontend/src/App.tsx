@@ -88,6 +88,9 @@ export default function App() {
   const [stages, setStages] = useState<ProcessingStage[]>([]);
   const [activity, setActivity] = useState<ProcessingEvent[]>([]);
   const [showActivity, setShowActivity] = useState(false);
+  const [showProcessingDetails, setShowProcessingDetails] = useState(true);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -96,6 +99,10 @@ export default function App() {
   const isReady = status?.status === "completed";
   const canAsk = Boolean(videoId && isReady);
   const isBusy = status !== null && !isReady && status.status !== "failed";
+
+  useEffect(() => {
+    setShowProcessingDetails(!isReady);
+  }, [isReady]);
 
   useEffect(() => {
     const recovered = window.localStorage.getItem("videomind.videoId");
@@ -157,6 +164,9 @@ export default function App() {
     setNotice(null);
     setStages([]);
     setActivity([]);
+    setShowProcessingDetails(true);
+    setShowTranscript(false);
+    setShowSummary(false);
     setPreviewUrl(null);
   };
 
@@ -254,6 +264,10 @@ export default function App() {
     }
   };
 
+  const overview = summary
+    ? Object.entries(summary).find(([key]) => key.toLowerCase() === "overview")?.[1]
+    : null;
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -271,7 +285,7 @@ export default function App() {
         {!videoId && (
           <div className="ingest-panel panel">
             <div className="panel-heading">
-              <div><span className="section-kicker">01 / Bring a source</span><h2>What should we explore?</h2></div>
+              <div><span className="section-kicker">01 / The source</span><h2>What should we explore?</h2></div>
               <span className="soft-label">Private workspace</span>
             </div>
             <label className={`drop-zone ${file ? "has-file" : ""}`}>
@@ -291,24 +305,44 @@ export default function App() {
 
         {videoId && (
           <>
-            <ProcessingActivity stages={stages} activity={activity} showActivity={showActivity} onToggle={() => setShowActivity((value) => !value)} ready={isReady} />
-            {status?.status === "failed" && <div className="failed-panel panel"><strong>We could not finish this video.</strong><span>Check the source and try again with a different file or link.</span><button className="secondary-button" type="button" onClick={resetWorkspace}>Try another source</button></div>}
+            <div className="results-stack">
+              <div className="video-frame panel">
+                {previewUrl ? <video ref={videoRef} controls src={previewUrl} /> : <div className="unavailable-media"><span className="play-glyph">▶</span><strong>Playback unavailable</strong><span>The original video is not retained by this workspace.</span></div>}
+              </div>
 
-            <div className="content-grid">
-              <section className="media-column">
-                <div className="video-frame panel">
-                  {previewUrl ? <video ref={videoRef} controls src={previewUrl} /> : <div className="unavailable-media"><span className="play-glyph">▶</span><strong>Playback unavailable</strong><span>The original video is not retained by this workspace.</span></div>}
+              <ProcessingActivity stages={stages} activity={activity} showActivity={showActivity} onToggle={() => setShowActivity((value) => !value)} ready={isReady} expanded={showProcessingDetails} onExpandedToggle={() => setShowProcessingDetails((value) => !value)} transcriptCount={transcript.length} />
+              {status?.status === "failed" && <div className="failed-panel panel"><strong>We could not finish this video.</strong><span>Check the source and try again with a different file or link.</span><button className="secondary-button" type="button" onClick={resetWorkspace}>Try another source</button></div>}
+
+              <section className="transcript panel">
+                <div className="panel-heading compact collapsible-heading">
+                  <div><span className="section-kicker">02 / The record</span><h2>Transcript</h2></div>
+                  <div className="section-heading-actions">
+                    {transcript.length > 0 && <span className="count-label">{transcript.length} segments</span>}
+                    <button className="activity-toggle section-toggle" type="button" onClick={() => setShowTranscript((value) => !value)} aria-expanded={showTranscript} aria-controls="transcript-content">
+                      {showTranscript ? "Hide transcript" : "View transcript"}<span>{showTranscript ? "−" : "+"}</span>
+                    </button>
+                  </div>
                 </div>
-                <div className="transcript panel">
-                  <div className="panel-heading compact"><div><span className="section-kicker">02 / The record</span><h2>Transcript</h2></div>{transcript.length > 0 && <span className="count-label">{transcript.length} segments</span>}</div>
+                <div id="transcript-content" hidden={!showTranscript}>
                   {transcript.length ? <div className="transcript-list">{transcript.map((segment, index) => <button className="transcript-row" type="button" key={`${segment.start}-${index}`} onClick={() => jumpTo(segment.start)} disabled={!previewUrl}><span>{formatTime(segment.start)}</span><p>{segment.text}</p></button>)}</div> : <EmptyState text={isReady ? "No transcript is available for this source." : "Your timestamped transcript will appear here when processing finishes."} />}
                 </div>
               </section>
 
-              <aside className="insight-column">
-                <section className="summary panel"><div className="panel-heading compact"><div><span className="section-kicker">03 / The signal</span><h2>Summary</h2></div><span className="summary-icon">✦</span></div>{summary ? <div className="summary-body">{Object.entries(summary).map(([key, value]) => <div className="summary-block" key={key}><span>{key.replaceAll("_", " ")}</span><p>{value}</p></div>)}</div> : <EmptyState text={isReady ? "Summary is not available for this source." : "A concise summary will appear here when processing finishes."} />}{summary && <SummaryAudio videoId={videoId} />}</section>
-                <section className="ask panel"><div className="panel-heading compact"><div><span className="section-kicker">04 / Ask the video</span><h2>What do you want to know?</h2></div></div><div className="ask-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={submitOnEnter} disabled={!canAsk || isAsking} placeholder={canAsk ? "Ask about a moment, idea, or detail..." : "Available when processing finishes"} rows={3} /><div className="ask-actions"><span>Enter to ask · Shift + Enter for a new line</span><button className={`mic-button ${isRecording ? "recording" : ""}`} type="button" onClick={() => void toggleRecording()} disabled={!canAsk || isAsking} title={isRecording ? "Stop recording" : "Ask with your microphone"}>{isRecording ? "■" : "●"}</button><button className="ask-button" type="button" onClick={() => void ask()} disabled={!canAsk || !question.trim() || isAsking}>{isAsking ? "Thinking..." : "Ask"}<span>↗</span></button></div></div>{voiceQuestion && <div className="voice-question"><span>Heard you say</span><p>“{voiceQuestion}”</p></div>}{answer && <AnswerCard answer={answer} onJump={jumpTo} canJump={Boolean(previewUrl)} videoId={videoId} />}</section>
-              </aside>
+              <section className="summary panel">
+                <div className="panel-heading compact collapsible-heading">
+                  <div><span className="section-kicker">03 / The signal</span><h2>Summary</h2></div>
+                  <button className="activity-toggle section-toggle" type="button" onClick={() => setShowSummary((value) => !value)} aria-expanded={showSummary} aria-controls="summary-content">
+                    {showSummary ? "Hide summary" : "View summary"}<span>{showSummary ? "−" : "+"}</span>
+                  </button>
+                </div>
+                {!showSummary && overview && <p className="summary-teaser">{overview}</p>}
+                <div id="summary-content" hidden={!showSummary}>
+                  {summary ? <div className="summary-body">{Object.entries(summary).map(([key, value]) => <div className="summary-block" key={key}><span>{key.replaceAll("_", " ")}</span><p>{value}</p></div>)}</div> : <EmptyState text={isReady ? "Summary is not available for this source." : "A concise summary will appear here when processing finishes."} />}
+                  {summary && <SummaryAudio videoId={videoId} />}
+                </div>
+              </section>
+
+              <section className="ask panel primary-action"><div className="panel-heading compact"><div><span className="section-kicker">04 / Ask the video</span><h2>What do you want to know?</h2></div></div><div className="ask-box"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={submitOnEnter} disabled={!canAsk || isAsking} placeholder={canAsk ? "Ask about a moment, idea, or detail..." : "Available when processing finishes"} rows={3} /><div className="ask-actions"><span>Enter to ask · Shift + Enter for a new line</span><button className={`mic-button ${isRecording ? "recording" : ""}`} type="button" onClick={() => void toggleRecording()} disabled={!canAsk || isAsking} title={isRecording ? "Stop recording" : "Ask with your microphone"}>{isRecording ? "■" : "●"}</button><button className="ask-button" type="button" onClick={() => void ask()} disabled={!canAsk || !question.trim() || isAsking}>{isAsking ? "Thinking..." : "Ask"}<span>↗</span></button></div></div>{voiceQuestion && <div className="voice-question"><span>Heard you say</span><p>“{voiceQuestion}”</p></div>}{answer && <AnswerCard answer={answer} onJump={jumpTo} canJump={Boolean(previewUrl)} videoId={videoId} />}</section>
             </div>
           </>
         )}
@@ -320,11 +354,13 @@ export default function App() {
 
 function EmptyState({ text }: { text: string }) { return <div className="empty-state"><span>◌</span><p>{text}</p></div>; }
 
-function ProcessingActivity({ stages, activity, showActivity, onToggle, ready }: { stages: ProcessingStage[]; activity: ProcessingEvent[]; showActivity: boolean; onToggle: () => void; ready: boolean }) {
+function ProcessingActivity({ stages, activity, showActivity, onToggle, ready, expanded, onExpandedToggle, transcriptCount }: { stages: ProcessingStage[]; activity: ProcessingEvent[]; showActivity: boolean; onToggle: () => void; ready: boolean; expanded: boolean; onExpandedToggle: () => void; transcriptCount: number }) {
   return <section className="processing-activity panel" aria-label="Processing activity">
-    <div className="activity-header"><div><span className="section-kicker">Processing activity</span><h2>{ready ? "Video ready" : "Working through your video"}</h2></div><span className={`activity-state ${ready ? "ready" : ""}`}>{ready ? "Complete" : "Live"}</span></div>
-    <div className="stage-list">
-      {stages.map((stage) => <div className={`stage-row ${stage.status}`} key={stage.id}>
+    {!expanded && <button className="processing-summary-bar" type="button" onClick={onExpandedToggle} aria-expanded={expanded} aria-controls="processing-details"><span className="processing-summary-icon" aria-hidden="true">✓</span><span><strong>Video ready</strong>{transcriptCount > 0 && ` · ${transcriptCount} segments transcribed`}</span><span className="processing-summary-action">View details <span>+</span></span></button>}
+    <div id="processing-details" hidden={!expanded}>
+    <div className="activity-header"><div><span className="section-kicker">Processing activity</span><h2>{ready ? "Video ready" : "Working through your video"}</h2></div><div className="activity-header-actions"><span className={`activity-state ${ready ? "ready" : ""}`}>{ready ? "Complete" : "Live"}</span><button className="activity-toggle section-toggle" type="button" onClick={onExpandedToggle} aria-expanded={expanded} aria-controls="processing-details">Hide details <span>−</span></button></div></div>
+    <div className="stage-list" role="list">
+      {stages.map((stage) => <div className={`stage-row ${stage.status}`} role="listitem" key={stage.id}>
         <span className="stage-icon" aria-hidden="true">{stage.status === "completed" || stage.status === "skipped" ? "✓" : stage.status === "running" ? "◉" : stage.status === "failed" ? "×" : "○"}</span>
         <div className="stage-main"><strong>{statusLabels[stage.id] || stage.display_name}</strong>{stage.status === "running" && stage.message && <span>{stage.message}</span>}{stage.detail && <small>{stage.detail}</small>}</div>
         {stage.progress !== null && stage.status !== "skipped" && <span className="stage-progress">{stage.progress}%</span>}
@@ -332,6 +368,7 @@ function ProcessingActivity({ stages, activity, showActivity, onToggle, ready }:
     </div>
     <button className="activity-toggle" type="button" onClick={onToggle} aria-expanded={showActivity}>{showActivity ? "Hide activity details" : "View activity details"}<span>{showActivity ? "−" : "+"}</span></button>
     {showActivity && <div className="activity-log">{activity.length ? activity.map((event, index) => <div key={`${event.timestamp}-${index}`}><time>{new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time><span>{event.message || event.event.replaceAll("_", " ")}</span></div>) : <span>No activity recorded yet.</span>}</div>}
+    </div>
   </section>;
 }
 
