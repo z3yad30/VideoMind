@@ -9,15 +9,18 @@ The backend and Vite frontend are implemented. The current deployment model is a
 The pipeline is:
 
 1. Upload a video/audio file or submit a YouTube URL.
-2. Download media when needed and extract audio with FFmpeg.
-3. Transcribe audio with configurable `faster-whisper`.
-4. Persist timestamped transcript segments.
-5. Chunk transcript segments while preserving timestamps.
-6. Embed chunks with configurable local Sentence Transformers models.
-7. Store chunks in a ChromaDB collection isolated by `video_id`.
-8. Generate a structured summary with Groq, using hierarchical summarization for long transcripts.
-9. Generate summary and answer audio through a replaceable TTS service.
-10. Answer questions by retrieving only from the selected video's collection, then passing retrieved context to Groq.
+2. Persist the source under `data/videos/{video_id}{extension}` for both uploads and YouTube downloads.
+3. Extract audio with FFmpeg in a temporary working directory.
+4. Transcribe audio with configurable `faster-whisper`.
+5. Persist timestamped transcript segments.
+6. Chunk transcript segments while preserving timestamps.
+7. Embed chunks with configurable local Sentence Transformers models.
+8. Store chunks in a ChromaDB collection isolated by `video_id`.
+9. Generate a structured summary with Groq, using hierarchical summarization for long transcripts.
+10. Generate summary and answer audio through a replaceable TTS service.
+11. Answer questions by retrieving only from the selected video's collection, then passing retrieved context to Groq.
+
+The important behavior change is that YouTube downloads are no longer temporary: the saved source remains in `data/videos/` after processing completes and is served through the backend media route for playback.
 
 The backend uses FastAPI and Uvicorn. Route handlers remain thin; processing, ASR, media, embedding, vector-store, LLM, and TTS responsibilities live in service modules.
 
@@ -119,6 +122,7 @@ The planned REST surface is:
 - `GET /videos/{video_id}`
 - `GET /videos/{video_id}/status`
 - `GET /videos/{video_id}/events` (Server-Sent Events for live processing activity)
+- `GET /videos/{video_id}/media` (serves the persisted source video after processing completes)
 - `GET /videos/{video_id}/transcript`
 - `GET /videos/{video_id}/summary`
 - `POST /videos/{video_id}/question`
@@ -136,7 +140,11 @@ Responses will also return retrieved timestamp sources so the frontend can later
 
 ## YouTube and Upload Processing
 
-Uploads will be validated by size, extension, and MIME type where available. Filenames will be sanitized and never used as identifiers. YouTube URLs will be validated before `yt-dlp` is invoked. Temporary downloads and extracted audio will be cleaned up after processing unless retained as an explicit application artifact. Invalid URLs, unsupported media, missing FFmpeg, failed downloads, corrupted files, empty audio, and service failures will produce logged, user-facing errors without exposing secrets.
+Uploads are validated by size, extension, and MIME type where available. Filenames are sanitized and never used as identifiers. YouTube URLs are validated before `yt-dlp` is invoked.
+
+The actual storage model is persistent: every successfully downloaded YouTube source is saved to `data/videos/{video_id}{extension}` and remains available after the job completes. Uploaded files also use the same source-storage pattern in `data/videos/`; only the extracted WAV/intermediate processing files live in temporary working directories and are cleaned up as part of the processing job. Playback is intentionally blocked until the job reaches `completed`, at which point the frontend loads the saved source from the backend media route instead of showing a broken object URL.
+
+Invalid URLs, unsupported media, missing FFmpeg, failed downloads, corrupted files, empty audio, and service failures still produce logged, user-facing errors without exposing secrets.
 
 ## Voice Question Pipeline
 
@@ -176,14 +184,15 @@ python -m pytest
 
 ## Current Phase Validation
 
-Completed in Phase 2:
+Current implementation status:
 
-- Added background upload and YouTube processing endpoints.
-- Added FFmpeg audio extraction to mono 16 kHz WAV.
-- Added a replaceable ASR service abstraction with a `faster-whisper` implementation.
-- Added JSON transcript artifacts preserving segment text, start seconds, and end seconds.
-- Added in-memory processing status tracking and failure reporting.
-- Added temporary media cleanup and deterministic tests for the processing pipeline.
+- Background upload and YouTube processing endpoints are active.
+- `yt-dlp` downloads now persist to `data/videos/{video_id}{extension}` instead of a temporary processing directory.
+- FFmpeg audio extraction still occurs in a temporary working directory to create mono 16 kHz WAV for ASR.
+- JSON transcript artifacts preserve segment text, start seconds, and end seconds.
+- In-memory processing status tracking and failure reporting remain in place.
+- Temporary extracted WAV files are cleaned up without deleting the persisted source artifact.
+- Persistent source playback is served by `GET /videos/{video_id}/media` only after processing reaches `completed`.
 
 Completed in Phase 6:
 

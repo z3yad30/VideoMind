@@ -20,8 +20,9 @@ The codebase does not implement accounts, authentication, authorization, multi-t
 |---|---|---|
 | API startup and routing | `backend/app/main.py` | Creates FastAPI app and includes health/video routers. |
 | File ingestion | `backend/app/api/videos.py:upload_video()` | Accepts multipart media, validates extension, saves it under a generated ID, and starts processing. |
-| YouTube ingestion | `backend/app/api/videos.py:process_youtube()` | Validates a YouTube URL and starts background download/processing. |
-| Media processing | `backend/app/services/media.py:MediaService` | Saves uploads, downloads with `yt-dlp`, and extracts mono 16 kHz WAV with FFmpeg. |
+| YouTube ingestion | `backend/app/api/videos.py:process_youtube()` | Validates a YouTube URL, downloads it as a persistent source, and starts background processing. |
+| Source media persistence | `backend/app/services/media.py:MediaService.download_youtube()` / `backend/app/services/video_processing.py` | Saves YouTube downloads to `data/videos/{video_id}{extension}` and keeps them after processing. |
+| Media processing | `backend/app/services/media.py:MediaService` | Saves uploads, downloads with `yt-dlp`, extracts mono 16 kHz WAV with FFmpeg, and serves the persisted source through the backend. |
 | Speech recognition | `backend/app/services/asr.py:FasterWhisperASRService` | Uses `faster-whisper` and preserves segment text/timestamps. |
 | Job tracking | `backend/app/services/video_processing.py:VideoProcessingService` | Tracks process-local jobs, stages, events, failures, and transcript persistence. |
 | Transcript storage | `backend/app/services/video_processing.py:_write_transcript()` | Atomically writes `data/transcripts/{video_id}.json`. |
@@ -63,7 +64,7 @@ flowchart TD
 - **API:** Root and health routes plus video lifecycle routes.
 - **Database:** No relational database or ORM is implemented. `backend/app/database/__init__.py` and `backend/app/models/__init__.py` are empty.
 - **Job state:** In-memory dictionaries inside one `VideoProcessingService` instance; lost on restart and not shared between workers.
-- **File storage:** Local `data/` directories for source media, transcripts, summaries, WAV artifacts, and Chroma persistence.
+- **File storage:** Local `data/` directories for persistent source media in `data/videos/`, transcripts, summaries, WAV artifacts, and Chroma persistence. Temporary extracted WAV/intermediate files are cleaned up without deleting the saved source video.
 - **AI:** Local `faster-whisper` ASR, local Sentence Transformers embeddings, Groq LLM, and local Windows SAPI TTS.
 - **Background processing:** `asyncio.create_task(asyncio.to_thread(video_service.process, ...))` in `backend/app/api/videos.py`.
 - **Queues/workers:** Not found in codebase.
@@ -105,7 +106,7 @@ flowchart TD
 | `tests/test_rag.py` | Tests | RAG tests. | Chunk retrieval, metadata timestamps, isolation, empty/missing collections, backend errors. |
 | `tests/test_llm.py` | Tests | LLM/AI tests. | Model default, prompts, hierarchical summaries, no-context behavior, error normalization. |
 | `tests/test_voice.py` | Tests | Voice/TTS tests. | ASR/RAG/TTS flow, replaceable TTS, summary audio, TTS failure normalization. |
-| `data/videos/` | Runtime storage | Uploaded/runtime source media. | Source file is removed after uploaded-file processing. |
+| `data/videos/` | Runtime storage | Persistent source media keyed by `video_id`. | Uploaded files and YouTube downloads both persist under `data/videos/{video_id}{extension}`; temporary extracted WAV files are cleaned, but the source remains. |
 | `data/transcripts/` | Runtime storage | JSON transcript artifacts. | `{video_id}.json` with segment text/start/end. |
 | `data/summaries/` | Runtime storage | Summary artifacts. | `{video_id}.json` with fixed summary fields. |
 | `data/audio/` | Runtime storage | Summary and answer WAV files. | Summary audio and answer audio paths. |
@@ -137,7 +138,7 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 **Responsibilities:** Construct shared `MediaService`, `VideoAIService`, `VideoProcessingService`, and `VoiceQuestionService`; validate request state; map service errors to HTTP status codes; start background processing; stream SSE events; serve artifacts.
 
-**Important symbols:** `_start_processing()`, `upload_video()`, `process_youtube()`, `get_video_status()`, `video_events()`, `get_transcript()`, `get_summary()`, `get_summary_audio()`, `ask_question()`, `ask_voice_question()`, `get_voice_answer_audio()`.
+**Important symbols:** `_start_processing()`, `upload_video()`, `process_youtube()`, `get_video_status()`, `video_events()`, `get_video_media()`, `get_transcript()`, `get_summary()`, `get_summary_audio()`, `ask_question()`, `ask_voice_question()`, `get_voice_answer_audio()`.
 
 **Dependencies/callers:** FastAPI calls route handlers. Handlers call schema validation, media methods, `VideoProcessingService`, `VideoAIService`, and `VoiceQuestionService`. Outputs are JSON, SSE, or `FileResponse`.
 
@@ -165,11 +166,11 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 ### `backend/app/services/media.py`
 
-**Purpose:** Convert user/source media into ASR-ready audio.
+**Purpose:** Convert user/source media into ASR-ready audio and persist the canonical source artifact.
 
 **Important symbols:** `MediaProcessingError`, `MediaService.save_upload()`, `extract_audio()`, `download_youtube()`, `validate_filename()`, `temporary_directory()`.
 
-**Inputs:** Upload-like objects, `Path`, YouTube URL, settings. **Outputs:** Saved source path or mono 16 kHz signed 16-bit WAV path. **Calls:** `subprocess.run` for FFmpeg and `yt_dlp.YoutubeDL` for YouTube. **Called by:** video processing and voice-question services.
+**Inputs:** Upload-like objects, `Path`, YouTube URL, settings. **Outputs:** Saved source path under `data/videos/{video_id}{extension}` or mono 16 kHz signed 16-bit WAV path in a temporary working directory. **Calls:** `subprocess.run` for FFmpeg and `yt_dlp.YoutubeDL` for YouTube. **Called by:** video processing and voice-question services.
 
 ### `backend/app/services/asr.py`
 
@@ -185,7 +186,7 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 **Important symbols:** `VideoJob`, `STAGES`, `VideoProcessingService.create_job()`, `get_job()`, `get_events()`, `process()`, `_get_asr()`, `get_transcript()`, `_write_transcript()`, `_set_job()`, `_stage()`, `_emit()`, `_rag_progress()`.
 
-**Inputs:** Generated video ID, uploaded/downloaded media path, optional source URL, injected services. **Outputs:** Job status/events, transcript artifact, completed/failed state. **Called by:** video routes. **Calls:** media, ASR, RAG through `VideoAIService._rag()`, summary generation/saving, TTS, and filesystem cleanup.
+**Inputs:** Generated video ID, uploaded/downloaded media path, optional source URL, injected services. **Outputs:** Job status/events, transcript artifact, completed/failed state. **Called by:** video routes. **Calls:** media, ASR, RAG through `VideoAIService._rag()`, summary generation/saving, TTS, and temporary-workdir cleanup without deleting the persisted source artifact.
 
 ### `backend/app/services/rag.py`
 
@@ -280,10 +281,10 @@ frontend/src/App.tsx: startProcessing()
 3. `create_job()` generates `uuid.uuid4().hex`, a 32-character lowercase hex ID.
 4. `save_upload()` streams 1 MiB chunks to `data/videos/{video_id}{suffix}` and enforces `MAX_UPLOAD_BYTES` (default 2 GiB).
 5. The route returns `202` and `{video_id, status: "queued"}` before processing completes.
-6. `process()` uses a temporary directory, extracts mono 16 kHz WAV, obtains timestamped ASR segments, and rejects empty transcription.
+6. `process()` uses a temporary working directory for extracted mono 16 kHz WAV and timestamped ASR segments, and rejects empty transcription.
 7. Transcript is atomically written as `{video_id, segments:[{text,start,end}]}`.
 8. If AI is configured, chunks are embedded/indexed, summary JSON is written, and summary WAV is generated.
-9. Uploaded source media is removed in `finally`; temporary extraction directories are removed by the context manager.
+9. The canonical source video remains in `data/videos/{video_id}{extension}`; temporary extraction directories are removed by the context manager, but the source is not deleted.
 
 ### Final output
 
@@ -297,11 +298,11 @@ The job becomes `completed`; frontend SSE/status refresh loads the transcript an
 
 ### External dependency
 
-`yt-dlp` is configured for audio-first formats, `noplaylist=True`, retries, fragment retries, socket timeout, continuation, and `max_filesize`. The downloaded source is temporary and is not retained after processing.
+`yt-dlp` is configured for a persistent video source, `noplaylist=True`, retries, fragment retries, socket timeout, continuation, and `max_filesize`. The downloaded source is stored as `data/videos/{video_id}{extension}` and remains available for backend playback after processing completes.
 
-### User-visible limitation
+### Playback behavior
 
-The frontend has no retained source URL/media playback after YouTube processing, so transcript/source timestamp jump controls are disabled because `previewUrl` is absent.
+The frontend keeps playback disabled until the job reaches `completed`. For local uploads it uses the browser object URL, while a completed YouTube source loads from `/videos/{video_id}/media` so timestamp jumping and playback work against the saved backend source.
 
 ## Service: Processing status and live activity
 
@@ -456,10 +457,11 @@ Open frontend
 Paste YouTube URL
 -> POST /videos/youtube
 -> Pydantic URL + host validation
--> yt-dlp download
+-> yt-dlp download into data/videos/{video_id}{extension}
 -> same processing pipeline
 -> transcript/summary/Q&A available
--> original playback unavailable because source is not retained
+-> backend media route serves saved source at /videos/{video_id}/media
+-> playback becomes available only after processing completes
 ```
 
 ### Journey: Ask by text
@@ -780,7 +782,7 @@ This is the primary interactive AI path.
 - Chroma collection names are `video_{video_id}`. Re-indexing deletes existing IDs before upserting.
 - Summary generation uses hierarchical batching at 12,000 characters and exact fixed keys.
 - Summary and transcript writes use temporary files and replace operations for atomic artifact replacement.
-- Uploaded source files are removed after processing; downloaded YouTube sources live under the temporary processing directory.
+- The persisted source remains under `data/videos/{video_id}{extension}`; only the extracted WAV and temporary processing files are cleaned.
 - Voice questions are deliberately not indexed.
 - The frontend `ProcessingStatus` type and label map include only `queued`, `downloading`, `extracting_audio`, `transcribing`, `indexing`, `completed`, and `failed`, while backend schemas can return `validating`, `detecting_language`, `building_transcript`, `chunking`, `embedding`, `summarizing`, and `generating_summary_audio`. This is a confirmed frontend/backend type drift.
 - `App` persists only the current video ID, not transcript/summary state. On reload it uses status/SSE and reloads artifacts after completion.
@@ -799,7 +801,7 @@ This is the primary interactive AI path.
 - No separate language detection implementation.
 - No export workflow.
 - No deployment, Docker, CI, worker, or cloud storage configuration.
-- YouTube/source playback is unavailable after processing because original media is not retained.
+- Playback remains gated until the job is completed; once ready, the saved source is served through `/videos/{video_id}/media`.
 - Frontend status union does not describe all backend status values.
 - No cleanup/retention policy for generated artifacts or Chroma collections.
 
@@ -877,6 +879,6 @@ VideoMind is a local-first video understanding MVP. The browser sends either a l
 
 After transcription, the backend chunks the transcript and embeds it into a persistent Chroma collection named `video_{video_id}`. The same chunks are sent through a lazy Groq client to produce a fixed five-field summary, which is stored as JSON and spoken to a WAV file through Windows SAPI/`pyttsx3`. A completed video can answer typed questions by retrieving up to five chunks from only its own collection and giving that context to Groq. If retrieval finds nothing, the LLM is skipped and a fixed unable-to-determine answer is returned. Spoken questions are temporarily transcribed, passed through the same question path, and converted to answer audio; the voice input is never indexed.
 
-The frontend mental model is one main React component: `App` starts ingestion, saves the current ID in localStorage, subscribes to `/events` with `EventSource`, reloads status/transcript/summary, displays processing stages, and provides transcript timestamp buttons, summary audio, typed questions, and browser microphone recording. Local uploads can be previewed; YouTube media is not retained, so playback and timestamp jumping are unavailable for it.
+The frontend mental model is one main React component: `App` starts ingestion, saves the current ID in localStorage, subscribes to `/events` with `EventSource`, reloads status/transcript/summary, displays processing stages, and provides transcript timestamp buttons, summary audio, typed questions, and browser microphone recording. Local uploads preview directly from a browser object URL, while completed YouTube videos load from the backend route `/videos/{video_id}/media` so playback and timestamp jumping work after processing completes without exposing arbitrary filesystem paths.
 
 The most important backend files are `backend/app/api/videos.py` for the HTTP boundary, `backend/app/services/video_processing.py` for orchestration and process-local jobs, `media.py` for FFmpeg/yt-dlp, `asr.py` for Whisper, `rag.py` for Chroma, `llm.py` for Groq/summaries/Q&A, `voice.py` for spoken questions, and `tts.py` for audio. There is no relational database, auth, durable queue, multi-user ownership, or production deployment layer. Job state disappears on restart even when artifacts remain. Before changing the project, preserve video IDs/timestamp metadata, remember that all result routes require an in-memory completed job, keep Q&A video-scoped, and check the frontend/backend processing-status type drift. Treat the local Groq credential as compromised and rotate it before normal use.

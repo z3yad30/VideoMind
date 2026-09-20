@@ -47,15 +47,16 @@ class MediaService:
             raise MediaProcessingError(f"Audio extraction failed: {detail}")
         return audio_path
 
-    def download_youtube(self, url: str, output_dir: Path) -> Path:
+    def download_youtube(self, url: str, output_dir: Path, video_id: str | None = None) -> Path:
         output_dir.mkdir(parents=True, exist_ok=True)
+        basename = video_id or "source"
         try:
             import yt_dlp
         except ImportError as exc:
             raise MediaProcessingError("yt-dlp is not installed") from exc
         options = {
-            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
-            "outtmpl": str(output_dir / "source.%(ext)s"),
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best",
+            "outtmpl": str(output_dir / f"{basename}.%(ext)s"),
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -70,10 +71,10 @@ class MediaService:
                 downloader.download([url])
         except Exception as exc:
             raise MediaProcessingError(f"YouTube download failed: {exc}") from exc
-        files = [path for path in output_dir.glob("source.*") if path.is_file()]
+        files = [path for path in output_dir.glob(f"{basename}.*") if path.is_file()]
         if not files:
             raise MediaProcessingError("YouTube download produced no media file")
-        return files[0]
+        return sorted(files)[0]
 
     @classmethod
     def validate_filename(cls, filename: str | None) -> str:

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import mimetypes
 from pathlib import Path
 import re
 
@@ -37,6 +38,17 @@ def _start_processing(video_id: str, media_path: Path, source_url: str | None = 
     task = asyncio.create_task(asyncio.to_thread(video_service.process, video_id, media_path, source_url))
     _processing_tasks.add(task)
     task.add_done_callback(_processing_tasks.discard)
+
+
+def _resolve_source_media_path(video_id: str) -> Path:
+    if not _ARTIFACT_ID.fullmatch(video_id):
+        raise HTTPException(status_code=404, detail="Video not found")
+    videos_dir = settings.project_root / "data" / "videos"
+    matches = sorted(path for path in videos_dir.glob(f"{video_id}.*") if path.is_file())
+    for candidate in matches:
+        if candidate.suffix.lower() in MediaService.supported_extensions:
+            return candidate
+    raise HTTPException(status_code=404, detail="Video not found")
 
 
 @router.post("/upload", response_model=VideoJobResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -137,6 +149,18 @@ async def get_summary_audio(video_id: str) -> FileResponse:
     if audio_path is None:
         raise HTTPException(status_code=404, detail="Summary audio is not ready")
     return FileResponse(audio_path, media_type="audio/wav", filename=f"{video_id}-summary.wav")
+
+
+@router.get("/{video_id}/media")
+async def get_video_media(video_id: str) -> FileResponse:
+    job = video_service.get_job(video_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if job.status != "completed":
+        raise HTTPException(status_code=409, detail="Video is not ready")
+    source_path = _resolve_source_media_path(video_id)
+    media_type = mimetypes.guess_type(source_path.name)[0] or "application/octet-stream"
+    return FileResponse(source_path, media_type=media_type, filename=source_path.name)
 
 
 @router.post("/{video_id}/question", response_model=QuestionResponse)

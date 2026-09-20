@@ -74,7 +74,7 @@ class VideoProcessingService:
                 self._stage(video_id, "validating", "completed", "Media source accepted")
                 if source_url:
                     self._stage(video_id, "downloading", "running", "Downloading YouTube video")
-                    media_path = self.media.download_youtube(source_url, Path(temp_dir))
+                    media_path = self.media.download_youtube(source_url, settings.project_root / "data" / "videos", video_id)
                     self._stage(video_id, "downloading", "completed", "Video downloaded")
                 else:
                     self._stage(video_id, "downloading", "skipped", "Not needed for an uploaded file")
@@ -116,9 +116,6 @@ class VideoProcessingService:
             failed_stage = next((stage["id"] for stage in (current.stages or []) if stage["status"] == "running"), "processing") if current else "processing"
             self._stage(video_id, str(failed_stage), "failed", "Processing failed", str(exc))
             self._set_job(video_id, "failed", str(exc))
-        finally:
-            if not source_url:
-                media_path.unlink(missing_ok=True)
 
     def _get_asr(self) -> ASRService:
         if self.asr is not None:

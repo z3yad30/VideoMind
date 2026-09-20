@@ -28,7 +28,7 @@ class FakeASR:
         return [ASRSegment(" first sentence ", 0.25, 1.75), ASRSegment("second sentence", 2.0, 3.5)]
 
 
-def test_processing_preserves_timestamps_and_cleans_source() -> None:
+def test_processing_preserves_timestamps_and_keeps_source() -> None:
     source = Path("data/videos/test-phase2-source.wav")
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"source")
@@ -42,7 +42,7 @@ def test_processing_preserves_timestamps_and_cleans_source() -> None:
             {"text": " first sentence ", "start": 0.25, "end": 1.75},
             {"text": "second sentence", "start": 2.0, "end": 3.5},
         ]
-        assert not source.exists()
+        assert source.exists()
     finally:
         (Path("data/transcripts") / f"{video_id}.json").unlink(missing_ok=True)
 
@@ -64,7 +64,7 @@ def test_processing_emits_stage_events() -> None:
         (Path("data/transcripts") / f"{video_id}.json").unlink(missing_ok=True)
 
 
-def test_processing_records_failure_and_cleans_source() -> None:
+def test_processing_records_failure_and_keeps_source() -> None:
     source = Path("data/videos/test-phase2-failure.wav")
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"source")
@@ -76,7 +76,7 @@ def test_processing_records_failure_and_cleans_source() -> None:
         job = service.get_job(video_id)
         assert job.status == "failed"
         assert job.error
-        assert not source.exists()
+        assert source.exists()
     finally:
         (Path("data/transcripts") / f"{video_id}.json").unlink(missing_ok=True)
 
@@ -217,7 +217,7 @@ def test_concurrent_jobs_keep_independent_state(tmp_path: Path) -> None:
     assert [service.get_job(video_id).status for video_id in video_ids] == ["completed", "completed"]
 
 
-def test_youtube_downloader_uses_single_video_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_youtube_downloader_persists_source_under_video_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls: list[tuple[list[str], dict]] = []
 
     class FakeDownloader:
@@ -232,19 +232,66 @@ def test_youtube_downloader_uses_single_video_mode(monkeypatch: pytest.MonkeyPat
 
         def download(self, urls):
             calls[-1] = (urls, calls[-1][1])
-            (tmp_path / "source.mp4").write_bytes(b"video")
+            (tmp_path / "abc123.mp4").write_bytes(b"video")
 
     monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeDownloader))
-    result = MediaService().download_youtube("https://www.youtube.com/watch?v=example", tmp_path)
+    result = MediaService().download_youtube("https://www.youtube.com/watch?v=example", tmp_path, "abc123")
 
-    assert result == tmp_path / "source.mp4"
+    assert result == tmp_path / "abc123.mp4"
     assert calls[0][0] == ["https://www.youtube.com/watch?v=example"]
     assert calls[0][1]["noplaylist"] is True
+    assert result.exists()
 
 
 def test_youtube_request_rejects_non_youtube_hosts() -> None:
     with pytest.raises(Exception, match="Only YouTube URLs are supported"):
         YouTubeRequest(url="https://example.com/video")
+
+
+@pytest.mark.asyncio
+async def test_media_endpoint_requires_completed_processing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    media_id = "a" * 32
+    media_path = tmp_path / "data" / "videos" / f"{media_id}.mp4"
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"video")
+    monkeypatch.setattr(videos_api, "settings", SimpleNamespace(project_root=tmp_path))
+    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="transcribing")))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/videos/{media_id}/media")
+
+    assert response.status_code == 409
+    assert "not ready" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_media_endpoint_serves_persisted_video(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    media_id = "b" * 32
+    media_path = tmp_path / "data" / "videos" / f"{media_id}.mp4"
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"video")
+    monkeypatch.setattr(videos_api, "settings", SimpleNamespace(project_root=tmp_path))
+    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/videos/{media_id}/media")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("video/mp4")
+    assert response.content == b"video"
+
+
+@pytest.mark.asyncio
+async def test_media_endpoint_rejects_unknown_or_unsafe_ids(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(videos_api, "settings", SimpleNamespace(project_root=tmp_path))
+    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        missing = await client.get("/videos/" + "c" * 32 + "/media")
+        unsafe = await client.get("/videos/../../etc/passwd/media")
+
+    assert missing.status_code == 404
+    assert unsafe.status_code in {404, 422}
 
 
 @pytest.mark.asyncio
