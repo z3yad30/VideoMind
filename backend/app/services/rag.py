@@ -274,19 +274,19 @@ class TranscriptRAGService:
     def get_transcript_context(self, video_id: str) -> str:
         return self.get_transcript_context_for_question(video_id)
 
-    def get_transcript_context_for_question(
+    def get_transcript_segments_for_question(
         self,
         video_id: str,
         question: str = "",
         max_characters: int = 12000,
-    ) -> str:
+    ) -> list[dict[str, object]]:
         transcript_path = self.transcript_dir / f"{video_id}.json"
         if not transcript_path.exists():
-            return "No raw transcript is available."
+            return []
         try:
             payload = json.loads(transcript_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return "No raw transcript is available."
+            return []
         segments = [
             segment
             for segment in (payload.get("segments", []) if isinstance(payload, dict) else [])
@@ -296,7 +296,7 @@ class TranscriptRAGService:
             and "end" in segment
         ]
         if not segments:
-            return "No raw transcript is available."
+            return []
 
         question_terms = {
             term for term in re.findall(r"[a-z0-9]+", question.lower()) if len(term) > 2
@@ -322,11 +322,31 @@ class TranscriptRAGService:
 
         if not selected_indexes:
             selected_indexes.update(range(min(len(segments), 12)))
-        context = "\n\n".join(
-            f"[{segments[index]['start']}-{segments[index]['end']}] {segments[index]['text']}"
-            for index in sorted(selected_indexes)
+        selected: list[dict[str, object]] = []
+        character_count = 0
+        for index in sorted(selected_indexes):
+            segment = segments[index]
+            text = str(segment["text"])
+            formatted = f"[{segment['start']}-{segment['end']}] {text}"
+            if selected and character_count + len(formatted) + 2 > max_characters:
+                break
+            selected.append({"text": text, "metadata": {"start": segment["start"], "end": segment["end"]}})
+            character_count += len(formatted) + (2 if selected else 0)
+        return selected
+
+    def get_transcript_context_for_question(
+        self,
+        video_id: str,
+        question: str = "",
+        max_characters: int = 12000,
+    ) -> str:
+        selected = self.get_transcript_segments_for_question(video_id, question, max_characters)
+        if not selected:
+            return "No raw transcript is available."
+        return "\n\n".join(
+            f"[{item['metadata']['start']}-{item['metadata']['end']}] {item['text']}"
+            for item in selected
         )
-        return context[:max_characters] or "No raw transcript is available."
 
     def build_rag_context(self, video_id: str, question: str, top_k: int = 5) -> str:
         chunks = self.retrieve_relevant_chunks(video_id, question, top_k)

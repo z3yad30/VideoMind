@@ -255,18 +255,23 @@ class VideoAIService:
         history = self._prompt_history(video_id)
         if chunks:
             answer = self.llm.answer(question, chunks, history=history, summary=summary, evidence_mode="transcript")
+            source_chunks = chunks
         else:
+            source_chunks = rag.get_transcript_segments_for_question(video_id, question)
             answer = self.llm.answer(
                 question,
                 [],
                 history=history,
                 summary=summary,
-                raw_transcript=rag.get_transcript_context_for_question(video_id, question),
+                raw_transcript="\n\n".join(
+                    f"[{item['metadata']['start']}-{item['metadata']['end']}] {item['text']}"
+                    for item in source_chunks
+                ) or "No raw transcript is available.",
                 evidence_mode="raw_transcript_fallback",
             )
         sources = [
             {"start": float(item["metadata"]["start"]), "end": float(item["metadata"]["end"]), "text": str(item["text"])}
-            for item in chunks
+            for item in source_chunks
             if isinstance(item.get("metadata"), dict)
             and "start" in item["metadata"]
             and "end" in item["metadata"]

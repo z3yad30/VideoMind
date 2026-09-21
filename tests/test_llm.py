@@ -27,8 +27,10 @@ class FakeRAG:
     def retrieve_relevant_chunks(self, video_id, question, top_k):
         return self.chunks
 
-    def get_transcript_context_for_question(self, video_id, question):
-        return self.raw_transcript
+    def get_transcript_segments_for_question(self, video_id, question):
+        if self.raw_transcript == "No raw transcript is available.":
+            return []
+        return [{"text": "A raw transcript fact", "metadata": {"start": 1.0, "end": 2.0}}]
 
 
 def test_groq_default_model_and_grounded_question_prompt() -> None:
@@ -75,7 +77,7 @@ def test_raw_transcript_fallback_calls_the_llm_with_transcript_context(tmp_path:
     result = service.answer_question("video-1", "What is not in the transcript?")
 
     assert result["answer"] == "The raw transcript explains the topic."
-    assert result["sources"] == []
+    assert result["sources"] == [{"start": 1.0, "end": 2.0, "text": "A raw transcript fact"}]
     assert "RAW VIDEO TRANSCRIPT:" in client.prompts[0]
     assert "A raw transcript fact" in client.prompts[0]
     assert "Use the raw transcript to determine whether the question can be answered." in client.prompts[0]
