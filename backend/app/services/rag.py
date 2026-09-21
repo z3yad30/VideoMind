@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -8,6 +9,10 @@ from typing import Any, Callable, Protocol
 from backend.app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+MIN_SIMILARITY = 0.70
+RELATIVE_MARGIN = 0.10
+DEFAULT_TOP_K = 5
 
 
 class EmbeddingModel(Protocol):
@@ -87,6 +92,23 @@ def embedding_rows(embeddings: Any) -> list[list[float]]:
     if hasattr(embeddings, "tolist"):
         embeddings = embeddings.tolist()
     return embeddings
+
+
+def normalize_distance_to_similarity(distance: object, collection_space: str = "") -> float:
+    try:
+        value = float(distance)
+    except (TypeError, ValueError):
+        return 0.0
+    if value != value:
+        return 0.0
+    space = (collection_space or "").lower()
+    if space in {"cosine", "ip"}:
+        return max(0.0, min(1.0, 1.0 - value))
+    if space == "l2":
+        return max(0.0, min(1.0, 1.0 / (1.0 + value)))
+    if 0.0 <= value <= 1.0:
+        return max(0.0, min(1.0, 1.0 - value))
+    return max(0.0, min(1.0, 1.0 / (1.0 + value)))
 
 
 def chunk_transcript(segments: list[dict[str, object]], max_characters: int = 1000) -> list[TranscriptChunk]:
@@ -186,6 +208,25 @@ class TranscriptRAGService:
             on_progress("indexing", len(texts), len(texts))
         return [{"text": chunk.text, "metadata": chunk.metadata(video_id, source)} for chunk in chunks]
 
+    @classmethod
+    def filter_relevant_chunks(
+        cls,
+        chunks: list[dict[str, object]],
+        min_similarity: float = 0.70,
+        relative_margin: float = 0.10,
+    ) -> list[dict[str, object]]:
+        if not chunks:
+            return []
+        similarities = [float(chunk.get("similarity", 0.0) or 0.0) for chunk in chunks]
+        top_similarity = max(similarities, default=0.0)
+        dynamic_threshold = max(min_similarity, top_similarity - relative_margin)
+        return [
+            chunk
+            for chunk in chunks
+            if float(chunk.get("similarity", 0.0) or 0.0) >= min_similarity
+            and float(chunk.get("similarity", 0.0) or 0.0) >= dynamic_threshold
+        ]
+
     def retrieve_relevant_chunks(self, video_id: str, question: str, top_k: int = 5) -> list[dict[str, object]]:
         if not question or top_k < 1:
             return []
@@ -193,15 +234,99 @@ class TranscriptRAGService:
         if not transcript_path.exists():
             return []
         collection = self.client.get_collection(self.collection_name(video_id))
-        result = collection.query(query_embeddings=embedding_rows(self.embedding_model.encode([question])), n_results=top_k)
+        query_vector = embedding_rows(self.embedding_model.encode([question]))[0]
+        result = collection.query(
+            query_embeddings=[query_vector],
+            n_results=top_k,
+            include=["documents", "metadatas", "distances", "embeddings"],
+        )
         documents = (result.get("documents") or [[]])[0]
         metadatas = (result.get("metadatas") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]
-        return [
-            {"text": text, "metadata": metadata, "distance": distances[index] if index < len(distances) else None}
-            for index, (text, metadata) in enumerate(zip(documents, metadatas))
-            if isinstance(metadata, dict) and metadata.get("video_id") == video_id
+        embeddings = (result.get("embeddings") or [[]])[0]
+        collection_space = ""
+        metadata = getattr(collection, "metadata", None)
+        if isinstance(metadata, dict):
+            collection_space = str(metadata.get("hnsw:space") or metadata.get("space") or "")
+        candidates: list[dict[str, object]] = []
+        for index, (text, metadata) in enumerate(zip(documents, metadatas)):
+            if not isinstance(metadata, dict) or metadata.get("video_id") != video_id:
+                continue
+            distance = distances[index] if index < len(distances) else None
+            embedding = embeddings[index] if index < len(embeddings) and isinstance(embeddings[index], (list, tuple)) else None
+            if embedding is not None:
+                candidate_norm = sum(value * value for value in embedding) ** 0.5 or 1.0
+                query_norm = sum(value * value for value in query_vector) ** 0.5 or 1.0
+                cosine = sum(a * b for a, b in zip(query_vector, embedding)) / (query_norm * candidate_norm)
+                similarity = max(0.0, min(1.0, cosine))
+            else:
+                similarity = normalize_distance_to_similarity(distance, collection_space)
+            candidates.append(
+                {
+                    "text": text,
+                    "metadata": metadata,
+                    "distance": distance,
+                    "similarity": similarity,
+                }
+            )
+        return self.filter_relevant_chunks(candidates)
+
+    def get_transcript_context(self, video_id: str) -> str:
+        return self.get_transcript_context_for_question(video_id)
+
+    def get_transcript_context_for_question(
+        self,
+        video_id: str,
+        question: str = "",
+        max_characters: int = 12000,
+    ) -> str:
+        transcript_path = self.transcript_dir / f"{video_id}.json"
+        if not transcript_path.exists():
+            return "No raw transcript is available."
+        try:
+            payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "No raw transcript is available."
+        segments = [
+            segment
+            for segment in (payload.get("segments", []) if isinstance(payload, dict) else [])
+            if isinstance(segment, dict)
+            and segment.get("text")
+            and "start" in segment
+            and "end" in segment
         ]
+        if not segments:
+            return "No raw transcript is available."
+
+        question_terms = {
+            term for term in re.findall(r"[a-z0-9]+", question.lower()) if len(term) > 2
+        }
+        scored = sorted(
+            (
+                len(question_terms.intersection(re.findall(r"[a-z0-9]+", str(segment["text"]).lower()))),
+                index,
+            )
+            for index, segment in enumerate(segments)
+        )
+        selected_indexes: set[int] = set()
+        for score, index in reversed(scored):
+            if score == 0 and selected_indexes:
+                break
+            selected_indexes.update(range(max(0, index - 1), min(len(segments), index + 2)))
+            context = "\n\n".join(
+                f"[{segments[item]['start']}-{segments[item]['end']}] {segments[item]['text']}"
+                for item in sorted(selected_indexes)
+            )
+            if len(context) >= max_characters:
+                break
+
+        if not selected_indexes:
+            selected_indexes.update(range(min(len(segments), 12)))
+        context = "\n\n".join(
+            f"[{segments[index]['start']}-{segments[index]['end']}] {segments[index]['text']}"
+            for index in sorted(selected_indexes)
+        )
+        return context[:max_characters] or "No raw transcript is available."
 
     def build_rag_context(self, video_id: str, question: str, top_k: int = 5) -> str:
         chunks = self.retrieve_relevant_chunks(video_id, question, top_k)

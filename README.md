@@ -18,7 +18,7 @@ The pipeline is:
 8. Store chunks in a ChromaDB collection isolated by `video_id`.
 9. Generate a structured summary with Groq, using hierarchical summarization for long transcripts.
 10. Generate summary and answer audio through a replaceable TTS service.
-11. Answer questions by retrieving only from the selected video's collection, then passing retrieved context to Groq.
+11. Answer questions using a bounded video-scoped retrieval flow: top 5 candidates, dynamic similarity filtering, and fallback to question-focused raw transcript excerpts when transcript evidence is too weak.
 
 The important behavior change is that YouTube downloads are no longer temporary: the saved source remains in `data/videos/` after processing completes and is served through the backend media route for playback.
 
@@ -134,9 +134,18 @@ Long-running processing runs in the background with stage snapshots and replayab
 
 ## RAG and ChromaDB
 
-Each video receives a generated `video_id` and its own ChromaDB collection named `video_<video_id>`. Every stored chunk includes its text, `video_id`, chunk ID, source, and start/end timestamps. Question retrieval receives the selected video ID and queries only that collection. Retrieved chunks are passed to a grounded Groq prompt that says not to invent unsupported information and to state when the answer is not present in the video context.
+Each video receives a generated `video_id` and its own ChromaDB collection named `video_<video_id>`. Every stored chunk includes its text, `video_id`, chunk ID, source, and start/end timestamps. Question retrieval receives the selected video ID and queries only that collection.
 
-Responses will also return retrieved timestamp sources so the frontend can later implement jump-to-timestamp behavior. Voice-question transcriptions are query-only and are never inserted into the video's transcript collection.
+The implemented retrieval policy is:
+
+- `top_k = 5`
+- `MIN_SIMILARITY = 0.70`
+- `RELATIVE_MARGIN = 0.10`
+- Keep only chunks with similarity >= `max(MIN_SIMILARITY, top_similarity - RELATIVE_MARGIN)` and similarity >= `MIN_SIMILARITY`
+
+This is a dynamic filter: weak results are discarded before the LLM sees them, but retrieval failure does not stop the question from being processed. If no transcript chunks pass the threshold, the system selects question-focused raw transcript excerpts from `data/transcripts/{video_id}.json`, preserving timestamps and limiting the context to 12,000 characters before asking the LLM whether the question is answerable. The structured summary remains available for display and audio, but is not used as the no-match question context.
+
+The LLM must not invent unsupported facts. If the question is unrelated to the video or the raw transcript has insufficient evidence, the answer states that the available video context does not provide enough information. Voice-question transcriptions are query-only and are never inserted into the video's transcript collection.
 
 ## YouTube and Upload Processing
 
@@ -148,24 +157,26 @@ Invalid URLs, unsupported media, missing FFmpeg, failed downloads, corrupted fil
 
 ## Voice Question Pipeline
 
-The planned microphone flow is:
+The implemented microphone flow is:
 
 ```text
-record audio -> upload voice question -> ASR -> text question -> video-scoped RAG -> text answer -> TTS -> audio answer
+record audio -> upload voice question -> ASR -> text question -> video-scoped RAG -> raw transcript fallback if needed -> text answer -> TTS -> audio answer
 ```
 
-The same RAG service will handle typed and transcribed questions.
+Typed and spoken questions share the same video-scoped retrieval, raw transcript fallback, and per-video conversation memory.
 
 ## Testing
 
 The test suite will cover video ID generation, segment-aware chunking, timestamp preservation, collection isolation, retrieval, LLM prompts, request validation, missing environment variables, malformed inputs, and one end-to-end flow with mocked external services. Tests will run without a real Groq API key or network access.
 
-The intended command is:
+The implemented command is:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m pytest
 ```
+
+The current suite verifies retrieval thresholds, raw transcript fallback, voice flow, history truncation, and per-video isolation.
 
 ## Current limitations
 

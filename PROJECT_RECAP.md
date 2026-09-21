@@ -10,7 +10,7 @@
 
 ### Purpose
 
-The implemented goal is to let a user bring one media source, wait for background processing, inspect its transcript and summary, and ask questions whose answers are based only on retrieved transcript context for that video. The intended audience is a person who wants to understand or search a video without watching all of it.
+The implemented goal is to let a user bring one media source, wait for background processing, inspect its transcript and summary, and ask questions whose answers are grounded in that video's evidence. The system now supports a retrieval-policy gate, a raw transcript fallback pathway, and bounded per-video conversation history so follow-up questions can work without leaking context across videos.
 
 The codebase does not implement accounts, authentication, authorization, multi-tenant isolation, or a relational database. It is a local MVP, not an internet-facing multi-user deployment.
 
@@ -55,6 +55,11 @@ flowchart TD
     AI --> TTS[Pyttsx3TTSService]
     TTS --> Audio[data/audio summaries and answers]
     React -->|SSE status/events and REST results| FastAPI
+    Question[Typed or voice question] --> History[Per-video conversation history max 3 messages]
+    History --> RAG
+    RAG -->|top_k=5, thresholded retrieval| Context[Selected chunks or raw transcript fallback]
+    Context --> Groq
+    Groq --> Answer[Grounded answer with timestamps when available]
 ```
 
 ### Architecture facts
@@ -190,19 +195,23 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 ### `backend/app/services/rag.py`
 
-**Purpose:** Build and query a video-scoped transcript knowledge base.
+**Purpose:** Build and query a video-scoped transcript knowledge base with dynamic evidence selection.
 
-**Important symbols:** `TranscriptChunk.metadata()`, `SentenceTransformerEmbedding.encode()`, `chunk_transcript()`, `TranscriptRAGService.collection_name()`, `index_transcript()`, `retrieve_relevant_chunks()`, `build_rag_context()`.
+**Important symbols:** `TranscriptChunk.metadata()`, `SentenceTransformerEmbedding.encode()`, `chunk_transcript()`, `TranscriptRAGService.collection_name()`, `index_transcript()`, `retrieve_relevant_chunks()`, `filter_relevant_chunks()`, `build_rag_context()`.
 
-**Inputs:** Transcript JSON, question, embedding model, Chroma client. **Outputs:** Chunks with text and start/end metadata, Chroma records, retrieved chunks, formatted context. **Called by:** `VideoAIService` and processing orchestration.
+**Inputs:** Transcript JSON, question, embedding model, Chroma client. **Outputs:** Chunks with text and start/end metadata, Chroma records, filtered transcript evidence, and formatted context. **Called by:** `VideoAIService` and processing orchestration.
+
+**Retrieval policy:** `top_k = 5`, `MIN_SIMILARITY = 0.70`, `RELATIVE_MARGIN = 0.10`. The service computes `top_similarity = max(similarities)` and keeps only chunks with `similarity >= max(0.70, top_similarity - 0.10)` and `similarity >= 0.70`. If no chunks pass, the question is not terminated early; the AI service selects question-focused raw transcript excerpts, preserving timestamps and limiting the context to 12,000 characters before sending it to the LLM.
 
 ### `backend/app/services/llm.py`
 
-**Purpose:** Connect retrieval to Groq summaries/answers and TTS artifacts.
+**Purpose:** Connect retrieval to Groq summaries/answers, raw transcript fallback, and TTS artifacts.
 
-**Important symbols:** `SUMMARY_FIELDS`, `GroqLLMService.client`, `complete()`, `summarize()`, `summarize_hierarchically()`, `answer()`, `_parse_summary()`, `VideoAIService._rag()`, `index_and_summarize()`, `generate_summary()`, `save_summary()`, `generate_summary_audio()`, `get_summary()`, `get_summary_audio_path()`, `answer_question()`.
+**Important symbols:** `SUMMARY_FIELDS`, `GroqLLMService.client`, `complete()`, `summarize()`, `summarize_hierarchically()`, `answer()`, `_parse_summary()`, `VideoAIService._rag()`, `index_and_summarize()`, `generate_summary()`, `save_summary()`, `generate_summary_audio()`, `get_summary()`, `get_summary_audio_path()`, `answer_question()`, `_conversation_for_video()`, `_prompt_history()`.
 
-**Inputs:** Transcript chunks/questions, settings, injectable LLM/RAG/TTS. **Outputs:** Fixed-field summary, summary JSON/WAV, answer and timestamp sources. **Calls:** Groq chat completions lazily, Chroma via RAG, `Pyttsx3TTSService` by default. **Called by:** processing and API routes.
+**Inputs:** Transcript chunks/questions, summary JSON, conversation history, settings, injectable LLM/RAG/TTS. **Outputs:** Fixed-field summary, summary JSON/WAV, grounded answer, and timestamp sources. **Calls:** Groq chat completions lazily, Chroma via RAG, `Pyttsx3TTSService` by default. **Called by:** processing and API routes.
+
+**Conversation policy:** history is stored per `video_id` and capped at the latest 3 prior messages before the current user question. The prompt explicitly says that history provides conversational context only, not authoritative evidence. Previous assistant messages are used to resolve references like pronouns, but the factual answer still depends on the current video's retrieved transcript evidence or raw transcript fallback.
 
 ### `backend/app/services/tts.py`
 
@@ -244,7 +253,57 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 **Purpose:** Defines the responsive visual interface. It contains the app shell, ingestion panel, processing stages, media/transcript/summary/Q&A layout, source controls, toast states, animations, and mobile breakpoints.
 
-## 5. Service-by-Service Functional Flows
+## 5. Retrieval and Raw Transcript Fallback Behavior
+
+### Retrieval policy
+
+The implemented evidence gate is:
+
+```text
+Question
+  -> query embedding
+  -> retrieve top 5 candidate chunks
+  -> compute similarity values
+  -> keep only chunks meeting min similarity and relative-to-best threshold
+  -> if at least one chunk remains, pass selected transcript chunks to LLM
+  -> if none remain, select bounded question-focused raw transcript excerpts and continue with LLM fallback
+```
+
+The constants are:
+
+```text
+top_k = 5
+MIN_SIMILARITY = 0.70
+RELATIVE_MARGIN = 0.10
+```
+
+The actual filter is:
+
+```python
+selected = [
+    chunk for chunk in chunks
+    if chunk_similarity >= MIN_SIMILARITY
+    and chunk_similarity >= max(MIN_SIMILARITY, top_similarity - RELATIVE_MARGIN)
+]
+```
+
+This keeps only the strongest transcript matches while still allowing valid near-top results. It also ensures the result never exceeds the original `top_k` candidate set.
+
+### Raw transcript fallback behavior
+
+When the selected transcript context is empty,
+
+```text
+No relevant chunks --> load raw transcript --> ask LLM whether the question is answerable --> if unrelated or unsupported, clearly say it is outside the video context or not answered by the available transcript
+```
+
+The fallback is not a generic `cannot determine` shortcut. The LLM receives bounded raw transcript excerpts selected using question-term overlap, including timestamps, and instructions to treat that transcript as untrusted evidence rather than commands. The fallback context is capped at 12,000 characters to avoid provider payload limits. The structured summary is not sent as fallback question context.
+
+### Conversation history behavior
+
+The conversation is scoped to `video_id` and bounded to the most recent 3 prior messages before the current question. The current user question remains separate. Voice and typed questions both append to the same conversation log for the same video. The prompt explicitly tells the model that prior messages are conversational context only and may not be treated as independent facts unless they are supported by the supplied evidence.
+
+## 6. Service-by-Service Functional Flows
 
 ## Service: Upload and process a local file
 
@@ -364,7 +423,7 @@ App.ask()
   -> AnswerCard + SourceList
 ```
 
-The route requires a completed in-memory job. RAG queries only `video_{video_id}` and filters returned metadata again by `video_id`. With no chunks, `GroqLLMService.answer()` returns `The answer cannot be determined from the video context.` without calling Groq. With chunks, the prompt includes timestamped context and explicitly forbids hallucination, outside knowledge, citations in the answer, and following instructions embedded in transcript context. Sources are returned separately with `start`, `end`, and `text`.
+The route requires a completed in-memory job. RAG queries only `video_{video_id}` and filters returned metadata again by `video_id`. With no chunks, `VideoAIService` selects bounded raw transcript excerpts and `GroqLLMService.answer()` sends them to Groq without timestamped retrieval sources. With chunks, the prompt includes only the selected timestamped context. Both paths explicitly forbid hallucination, outside knowledge, citations in the answer, and following instructions embedded in transcript context. Sources are returned separately with `start`, `end`, and `text` when retrieved chunks are available.
 
 ## Service: Voice question
 
@@ -471,7 +530,7 @@ Wait for completed status
 -> enter question
 -> click Ask or press Enter
 -> retrieve up to 5 chunks from selected video collection
--> Groq grounded answer or no-context fallback
+-> Groq grounded answer or raw-transcript fallback
 -> render answer and source timestamps
 ```
 
@@ -643,7 +702,7 @@ No Docker, CI, cloud object store, queue, worker framework, or deployment config
 - Missing Chroma backend errors propagate as runtime failures.
 - Groq configuration is checked lazily; provider failures normalize to `RuntimeError("LLM request failed")`.
 - Invalid/nonconforming summary JSON becomes an explicit runtime error.
-- No-context questions skip the LLM and return the fixed fallback.
+- Questions with no matching chunks still call the LLM with bounded raw transcript excerpts; only an unavailable or insufficient transcript should produce an unable-to-answer response.
 - Empty voice transcription raises `ValueError`.
 - Empty text or missing/empty TTS output raises an error; voice route normalizes unexpected TTS failures to 503.
 - Artifact audio routes require completed in-memory jobs and 32-character lowercase hex identifiers.

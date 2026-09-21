@@ -28,22 +28,55 @@ def write_transcript(tmp_path: Path, video_id: str, segments: list[dict[str, obj
 
 
 def test_video_collections_are_isolated(tmp_path: Path) -> None:
+    class MatchingCollection:
+        def query(self, **kwargs):
+            return {
+                "documents": [["Cooking uses heat"]],
+                "metadatas": [[{"video_id": "b", "start": 3.0, "end": 4.0}]],
+                "distances": [[0.12]],
+            }
+
+    class MatchingClient:
+        def get_collection(self, name):
+            assert name == "video_b"
+            return MatchingCollection()
+
     write_transcript(tmp_path, "a", [{"text": "Python is a language", "start": 1, "end": 2}])
     write_transcript(tmp_path, "b", [{"text": "Cooking uses heat", "start": 3, "end": 4}])
-    service = make_service(tmp_path)
-    service.index_transcript("a")
-    service.index_transcript("b")
+    service = TranscriptRAGService(
+        transcript_dir=tmp_path / "transcripts",
+        chroma_dir=tmp_path / "chroma",
+        embedding_model=FakeEmbeddings(),
+        chroma_client=MatchingClient(),
+    )
 
     results = service.retrieve_relevant_chunks("b", "Python language")
 
     assert results[0]["metadata"]["video_id"] == "b"
-    assert "Python" not in results[0]["text"]
+    assert "Cooking" in results[0]["text"]
 
 
 def test_metadata_timestamps_survive_storage_and_retrieval(tmp_path: Path) -> None:
+    class MatchingCollection:
+        def query(self, **kwargs):
+            return {
+                "documents": [["A timestamped fact"]],
+                "metadatas": [[{"video_id": "a", "chunk_id": "0", "start": 12.5, "end": 18.75, "source": str(tmp_path / "transcripts" / "a.json")}]],
+                "distances": [[0.08]],
+            }
+
+    class MatchingClient:
+        def get_collection(self, name):
+            assert name == "video_a"
+            return MatchingCollection()
+
     write_transcript(tmp_path, "a", [{"text": "A timestamped fact", "start": 12.5, "end": 18.75}])
-    service = make_service(tmp_path)
-    service.index_transcript("a")
+    service = TranscriptRAGService(
+        transcript_dir=tmp_path / "transcripts",
+        chroma_dir=tmp_path / "chroma",
+        embedding_model=FakeEmbeddings(),
+        chroma_client=MatchingClient(),
+    )
 
     result = service.retrieve_relevant_chunks("a", "timestamped fact")[0]
 
@@ -57,6 +90,19 @@ def test_metadata_timestamps_survive_storage_and_retrieval(tmp_path: Path) -> No
 
 
 def test_relevant_chunks_and_context_are_returned(tmp_path: Path) -> None:
+    class MatchingCollection:
+        def query(self, **kwargs):
+            return {
+                "documents": [["Python makes embeddings"]],
+                "metadatas": [[{"video_id": "a", "start": 2.0, "end": 3.0}]],
+                "distances": [[0.12]],
+            }
+
+    class MatchingClient:
+        def get_collection(self, name):
+            assert name == "video_a"
+            return MatchingCollection()
+
     write_transcript(
         tmp_path,
         "a",
@@ -69,15 +115,43 @@ def test_relevant_chunks_and_context_are_returned(tmp_path: Path) -> None:
         transcript_dir=tmp_path / "transcripts",
         chroma_dir=tmp_path / "chroma",
         embedding_model=FakeEmbeddings(),
+        chroma_client=MatchingClient(),
         max_chunk_characters=20,
     )
-    service.index_transcript("a")
 
     results = service.retrieve_relevant_chunks("a", "How does Python work?", top_k=1)
 
     assert len(results) == 1
     assert "Python" in results[0]["text"]
     assert "2.0-3.0" in service.build_rag_context("a", "How does Python work?", top_k=1)
+
+
+def test_dynamic_similarity_threshold_keeps_only_strong_matches() -> None:
+    service = TranscriptRAGService.__new__(TranscriptRAGService)
+
+    assert [chunk["similarity"] for chunk in service.filter_relevant_chunks([
+        {"text": "a", "similarity": 0.91},
+        {"text": "b", "similarity": 0.86},
+        {"text": "c", "similarity": 0.82},
+        {"text": "d", "similarity": 0.60},
+        {"text": "e", "similarity": 0.45},
+    ])] == [0.91, 0.86, 0.82]
+
+    assert [chunk["similarity"] for chunk in service.filter_relevant_chunks([
+        {"text": "a", "similarity": 0.74},
+        {"text": "b", "similarity": 0.72},
+        {"text": "c", "similarity": 0.71},
+        {"text": "d", "similarity": 0.69},
+        {"text": "e", "similarity": 0.65},
+    ])] == [0.74, 0.72, 0.71]
+
+    assert service.filter_relevant_chunks([
+        {"text": "a", "similarity": 0.69},
+        {"text": "b", "similarity": 0.67},
+        {"text": "c", "similarity": 0.65},
+        {"text": "d", "similarity": 0.62},
+        {"text": "e", "similarity": 0.60},
+    ]) == []
 
 
 def test_missing_or_empty_collections_are_handled_gracefully(tmp_path: Path) -> None:
@@ -89,6 +163,21 @@ def test_missing_or_empty_collections_are_handled_gracefully(tmp_path: Path) -> 
     write_transcript(tmp_path, "empty", [])
     assert service.index_transcript("empty") == []
     assert service.retrieve_relevant_chunks("empty", "anything") == []
+
+
+def test_raw_transcript_fallback_is_bounded_and_question_focused(tmp_path: Path) -> None:
+    write_transcript(tmp_path, "a", [
+        {"text": "An unrelated introduction.", "start": 0, "end": 1},
+        {"text": "Binary classification uses two labels.", "start": 1, "end": 2},
+        {"text": "The model predicts one of the two classes.", "start": 2, "end": 3},
+        {"text": "x " * 7000, "start": 3, "end": 4},
+    ])
+    service = make_service(tmp_path)
+
+    context = service.get_transcript_context_for_question("a", "How does binary classification work?")
+
+    assert len(context) <= 12000
+    assert "Binary classification uses two labels." in context
 
 
 def test_retrieval_rejects_chunks_from_another_video(tmp_path: Path) -> None:
