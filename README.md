@@ -113,6 +113,49 @@ The Vite development server runs at `http://localhost:5173` and proxies `/api` r
 
 The Python virtual environment installs backend dependencies from `requirements.txt`. Frontend dependencies cannot be installed into that environment because React and Vite are Node/npm packages. Install them once with `npm install` inside `frontend`; validate the production bundle with `npm run build`.
 
+## Runtime Data Reset: Vanish
+
+Use the standalone cleanup utility to remove only VideoMind’s generated runtime data while leaving the repository and source code intact.
+
+### What Vanish clears
+
+`python scripts/vanish.py`
+
+This command targets the project’s local runtime storage under `data/` and removes the generated contents from:
+
+- `data/videos/`
+- `data/audio/`
+- `data/transcripts/`
+- `data/summaries/`
+- `data/chroma/`
+
+It preserves the `data/` directory itself and keeps the expected runtime folders in place so the project can regenerate data cleanly.
+
+### What Vanish preserves
+
+Vanish does not delete:
+
+- project source code
+- backend or frontend dependencies
+- the `.venv` environment
+- `.git` metadata
+- README and documentation
+- `.env` and config files
+- any cache outside the runtime data scope
+- anything outside the repository’s `data/` directory
+
+### Cache protection
+
+Project caches remain untouched. The script explicitly clears only the allowlisted runtime directories under `data/` and never targets repository caches such as `.pytest_cache`, build output, or other directories outside that boundary.
+
+### Server independence
+
+Vanish is a standalone command-line utility. It does not require the FastAPI server, Uvicorn, frontend, or API routes to be running. It can be invoked directly from the project root with:
+
+```powershell
+python scripts/vanish.py
+```
+
 ## API Plan
 
 The planned REST surface is:
