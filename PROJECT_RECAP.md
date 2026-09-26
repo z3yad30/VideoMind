@@ -14,6 +14,8 @@ The implemented goal is to let a user bring one media source, wait for backgroun
 
 The repository also includes a standalone runtime reset helper, `scripts/vanish.py`, which removes generated processing artifacts from the local `data/` tree without deleting the project itself or other caches. The codebase does not implement accounts, authentication, authorization, multi-tenant isolation, or a relational database. It is a local MVP, not an internet-facing multi-user deployment.
 
+The frontend `AnswerCard` renders LLM answers with `react-markdown` and `remark-gfm`, preserving the backend Markdown while supporting headings, lists, tables, task lists, code blocks, links, and other GitHub-Flavored Markdown formatting.
+
 ### Core capabilities
 
 | Capability | Main entry point | Responsibility |

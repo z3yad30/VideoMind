@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   askQuestion,
   askVoiceQuestion,
@@ -385,5 +387,5 @@ function SummaryAudio({ videoId }: { videoId: string }) {
 
 function AnswerCard({ answer, onJump, canJump, videoId }: { answer: Answer | VoiceAnswer; onJump: (seconds: number) => void; canJump: boolean; videoId: string }) {
   const voiceAudio = "audio_answer_location" in answer ? answer.audio_answer_location : null;
-  return <div className="answer-card"><div className="answer-heading"><span>Answer</span>{voiceAudio && <audio controls src={resolveMediaUrl(voiceAudio)} />}</div><p className="answer-text">{answer.answer}</p>{answer.sources.length > 0 && <div className="sources"><span className="sources-label">Sources from the video</span>{answer.sources.map((source, index) => <SourceList key={`${source.start}-${index}`} source={source} onJump={onJump} canJump={canJump} />)}</div>}{answer.sources.length === 0 && <p className="no-sources">No matching timestamp was returned.</p>}<span className="answer-video-id" aria-hidden="true">{videoId}</span></div>;
+  return <div className="answer-card"><div className="answer-heading"><span>Answer</span>{voiceAudio && <audio controls src={resolveMediaUrl(voiceAudio)} />}</div><div className="answer-text"><ReactMarkdown remarkPlugins={[remarkGfm]}>{answer.answer}</ReactMarkdown></div>{answer.sources.length > 0 && <div className="sources"><span className="sources-label">Sources from the video</span>{answer.sources.map((source, index) => <SourceList key={`${source.start}-${index}`} source={source} onJump={onJump} canJump={canJump} />)}</div>}{answer.sources.length === 0 && <p className="no-sources">No matching timestamp was returned.</p>}<span className="answer-video-id" aria-hidden="true">{videoId}</span></div>;
 }
