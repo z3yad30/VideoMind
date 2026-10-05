@@ -78,6 +78,82 @@ async def test_chat_persists_after_store_reload(isolated_services: ChatStore) ->
 
 
 @pytest.mark.asyncio
+async def test_chat_question_persists_both_messages_sources_audio_and_reload(
+    isolated_services: ChatStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class AI:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def answer_question(self, video_id, question, *, history):
+            self.calls.append((video_id, question, history))
+            return {"answer": "A grounded answer", "sources": [{"start": 4.0, "end": 8.0, "text": "Evidence"}]}
+
+    ai = AI()
+    monkeypatch.setattr(chats_api, "ai_service", ai)
+    class Videos:
+        def get_job(self, video_id):
+            return type("Job", (), {"status": "completed"})()
+
+    class Voice:
+        def synthesize_answer(self, video_id, answer):
+            return "answer-id", Path("answer.wav")
+
+    monkeypatch.setattr(chats_api, "video_service", Videos())
+    monkeypatch.setattr(chats_api, "voice_service", Voice())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await register_and_login(client, "alice")
+        created = await client.post("/chats", json={
+            "video_id": "video-1",
+            "messages": [
+                {"role": "user", "content": f"Prior question {index}"}
+                for index in range(5)
+            ],
+        })
+        chat_id = created.json()["chat_id"]
+        response = await client.post(f"/chats/{chat_id}/messages", json={"question": "Explain this concept"})
+        restored = await client.get(f"/chats/{chat_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["user_message"]["content"] == "Explain this concept"
+    assert payload["assistant_message"]["content"] == "A grounded answer"
+    assert payload["assistant_message"]["sources"] == [{"start": 4.0, "end": 8.0, "text": "Evidence"}]
+    assert payload["assistant_message"]["timestamps"] == [4.0, 8.0]
+    assert payload["assistant_message"]["answer_audio_ref"] == "/videos/video-1/answers/answer-id/audio"
+    assert len(restored.json()["messages"]) == 7
+    assert restored.json()["messages"][-1]["content"] == "A grounded answer"
+    assert ai.calls[0] == ("video-1", "Explain this concept", [
+        {"role": "user", "content": "Prior question 2"},
+        {"role": "user", "content": "Prior question 3"},
+        {"role": "user", "content": "Prior question 4"},
+    ])
+    reloaded = ChatStore(isolated_services.root).get("alice", chat_id)
+    assert reloaded.messages[-1].sources[0].start == 4.0
+
+
+@pytest.mark.asyncio
+async def test_chat_question_requires_an_available_video(isolated_services: ChatStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(chats_api, "video_service", type("Videos", (), {"get_job": lambda self, _: None})())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await register_and_login(client, "alice")
+        no_video = await client.post("/chats", json={})
+        no_video_question = await client.post(
+            f"/chats/{no_video.json()['chat_id']}/messages", json={"question": "Question"}
+        )
+        missing_video = await client.post("/chats", json={"video_id": "missing-video"})
+        missing_video_question = await client.post(
+            f"/chats/{missing_video.json()['chat_id']}/messages", json={"question": "Question"}
+        )
+
+    assert no_video_question.status_code == 400
+    assert no_video_question.json()["detail"] == "Chat is not associated with a video"
+    assert missing_video_question.status_code == 404
+    assert missing_video_question.json()["detail"] == "Video not found"
+
+
+@pytest.mark.asyncio
 async def test_chat_detail_restores_canonical_video_context(isolated_services: ChatStore) -> None:
     data_root = isolated_services.data_root
     (data_root / "transcripts").mkdir(parents=True)
@@ -105,10 +181,11 @@ async def test_users_cannot_read_update_or_delete_another_users_chat(isolated_se
         chat_id = created.json()["chat_id"]
         read = await bob.get("/chats/" + chat_id)
         update = await bob.put("/chats/" + chat_id, json={"title": "stolen"})
+        ask = await bob.post("/chats/" + chat_id + "/messages", json={"question": "Question"})
         delete = await bob.delete("/chats/" + chat_id)
         still_owned = await alice.get("/chats/" + chat_id)
 
-    assert read.status_code == update.status_code == delete.status_code == 404
+    assert read.status_code == update.status_code == ask.status_code == delete.status_code == 404
     assert still_owned.status_code == 200
     assert still_owned.json()["title"] == "Alice's chat"
 

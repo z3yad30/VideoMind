@@ -248,20 +248,27 @@ class VideoAIService:
             return history[-4:-1]
         return history[-3:]
 
-    def answer_question(self, video_id: str, question: str, top_k: int = 5) -> dict[str, object]:
+    def answer_question(
+        self,
+        video_id: str,
+        question: str,
+        top_k: int = 5,
+        *,
+        history: list[dict[str, str]] | None = None,
+    ) -> dict[str, object]:
         rag = self._rag()
         chunks = rag.retrieve_relevant_chunks(video_id, question, top_k)
         summary = self.get_summary(video_id)
-        history = self._prompt_history(video_id)
+        prompt_history = self._prompt_history(video_id) if history is None else history[-3:]
         if chunks:
-            answer = self.llm.answer(question, chunks, history=history, summary=summary, evidence_mode="transcript")
+            answer = self.llm.answer(question, chunks, history=prompt_history, summary=summary, evidence_mode="transcript")
             source_chunks = chunks
         else:
             source_chunks = rag.get_transcript_segments_for_question(video_id, question)
             answer = self.llm.answer(
                 question,
                 [],
-                history=history,
+                history=prompt_history,
                 summary=summary,
                 raw_transcript="\n\n".join(
                     f"[{item['metadata']['start']}-{item['metadata']['end']}] {item['text']}"
@@ -276,8 +283,9 @@ class VideoAIService:
             and "start" in item["metadata"]
             and "end" in item["metadata"]
         ]
-        conversation = self._conversation_for_video(video_id)
-        conversation.extend([{"role": "user", "content": question}, {"role": "assistant", "content": answer}])
-        if len(conversation) > 12:
-            del conversation[:-12]
+        if history is None:
+            conversation = self._conversation_for_video(video_id)
+            conversation.extend([{"role": "user", "content": question}, {"role": "assistant", "content": answer}])
+            if len(conversation) > 12:
+                del conversation[:-12]
         return {"answer": answer, "sources": sources}

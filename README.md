@@ -122,11 +122,18 @@ Chat API (all endpoints require the HTTP-only authenticated session cookie):
 
 - `GET /chats` lists the current user's chats, newest activity first.
 - `POST /chats` creates a chat and returns its generated `chat_id`.
+- `POST /chats/{chat_id}/messages` accepts `{"question": "Explain this concept"}` and returns the saved `user_message`, generated `assistant_message`, its `sources`, and optional `answer_audio_location`.
 - `GET /chats/{chat_id}` returns one owned chat and resolves available video context.
 - `PUT /chats/{chat_id}` updates chat metadata/content, including the complete message list when supplied.
 - `DELETE /chats/{chat_id}` deletes an owned chat and returns `204`.
 
-Persistent chat history is separate from LLM conversation context. Saving a full conversation does not send it to Groq: the existing video-scoped RAG path and its bounded recent-context behavior remain unchanged. Chat files are user data and are not removed by the Vanish runtime cleanup utility.
+### Chat Question Flow
+
+`POST /chats/{chat_id}/messages` requires an authenticated owner and a chat associated with a video whose processing job is complete. The endpoint saves the user message first, then calls the same `VideoAIService.answer_question(video_id, question)` pipeline used by standalone video Q&A. Retrieval remains restricted to that video's Chroma collection and keeps the configured similarity thresholds and question-focused raw transcript fallback. A missing video returns `404`; a chat without a video returns `400`, and an unfinished video returns `409`.
+
+The assistant reply is saved with its text, source excerpts and start/end times, a timestamp list, creation time, and an answer-audio reference when TTS succeeds. Answer audio uses the existing `VoiceQuestionService` TTS adapter and `GET /videos/{video_id}/answers/{answer_id}/audio` route. If TTS is unavailable, the text answer is still returned and persisted without an audio reference. The response includes both saved messages and the source list.
+
+Persistent chat history is the complete ordered conversation and survives backend reloads. It is separate from LLM context: each chat question sends at most the latest three prior user/assistant messages to Groq, never the full history. Retrieved evidence remains the authority for factual answers. Chat files are user data and are not removed by the Vanish runtime cleanup utility.
 
 ## Running the Frontend
 
@@ -200,6 +207,7 @@ Chat endpoints (authenticated):
 
 - `GET /chats`
 - `POST /chats`
+- `POST /chats/{chat_id}/messages`
 - `GET /chats/{chat_id}`
 - `PUT /chats/{chat_id}`
 - `DELETE /chats/{chat_id}`

@@ -36,14 +36,7 @@ class VoiceQuestionService:
             raise ValueError("Voice question produced no speech")
 
         result = self.ai.answer_question(video_id, question)
-        answer_id = uuid.uuid4().hex
-        audio_path = self.audio_dir / video_id / f"{answer_id}.wav"
-        try:
-            (self.tts or Pyttsx3TTSService()).synthesize(str(result["answer"]), audio_path)
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            raise RuntimeError("TTS synthesis failed") from exc
+        answer_id, audio_path = self.synthesize_answer(video_id, str(result["answer"]))
         return {
             "transcribed_question": question,
             "answer": result["answer"],
@@ -51,3 +44,14 @@ class VoiceQuestionService:
             "answer_id": answer_id,
             "audio_path": audio_path,
         }
+
+    def synthesize_answer(self, video_id: str, answer: str) -> tuple[str, Path]:
+        answer_id = uuid.uuid4().hex
+        audio_path = self.audio_dir / video_id / f"{answer_id}.wav"
+        try:
+            (self.tts or Pyttsx3TTSService()).synthesize(answer, audio_path)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError("TTS synthesis failed") from exc
+        return answer_id, audio_path

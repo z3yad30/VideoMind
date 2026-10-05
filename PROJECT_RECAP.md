@@ -25,8 +25,8 @@ The frontend `AnswerCard` renders LLM answers with `react-markdown` and `remark-
 | User identity dependency | `backend/app/api/dependencies.py` | Resolves the current request's session cookie for protected chat routes. |
 | Authentication and sessions | `backend/app/services/auth.py` | Hashes/verifies passwords and manages expiring in-memory sessions. |
 | User storage | `backend/app/services/user_storage.py` | Reads users and atomically writes `data/users/users.json`. |
-| Persistent chat API | `backend/app/api/chats.py` | Authenticated chat CRUD; derives owner only from the session identity. |
-| Chat schemas/storage | `backend/app/schemas/chats.py`, `backend/app/services/chat_storage.py` | Validates chat payloads and atomically stores one JSON file per chat under its username. |
+| Persistent chat API | `backend/app/api/chats.py` | Authenticated chat CRUD and chat question flow; derives owner only from the session identity and connects owned chats to video Q&A. |
+| Chat schemas/storage | `backend/app/schemas/chats.py`, `backend/app/services/chat_storage.py` | Validates chat payloads, appends messages, and atomically stores one JSON file per chat under its username. |
 | File ingestion | `backend/app/api/videos.py:upload_video()` | Accepts multipart media, validates extension, saves it under a generated ID, and starts processing. |
 | YouTube ingestion | `backend/app/api/videos.py:process_youtube()` | Validates a YouTube URL, downloads it as a persistent source, and starts background processing. |
 | Source media persistence | `backend/app/services/media.py:MediaService.download_youtube()` / `backend/app/services/video_processing.py` | Saves YouTube downloads to `data/videos/{video_id}{extension}` and keeps them after processing. |
@@ -251,7 +251,17 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 **Inputs:** Transcript chunks/questions, summary JSON, conversation history, settings, injectable LLM/RAG/TTS. **Outputs:** Fixed-field summary, summary JSON/WAV, grounded answer, and timestamp sources. **Calls:** Groq chat completions lazily, Chroma via RAG, `Pyttsx3TTSService` by default. **Called by:** processing and API routes.
 
-**Conversation policy:** the LLM service keeps a process-local history per `video_id` and sends at most the latest 3 prior messages before the current user question. This bounded LLM context is separate from persistent chat files: saved full chat history is not automatically loaded into Groq. The prompt explicitly says that context provides conversational continuity only, not authoritative evidence. Previous assistant messages may resolve references, but factual answers still depend on the current video's retrieved transcript evidence or raw transcript fallback.
+**Conversation policy:** standalone video questions use the existing process-local history per `video_id`; chat questions pass only the latest 3 prior user/assistant messages from the persistent chat. In either mode, no more than 3 prior messages reach Groq. This bounded LLM context is separate from the complete persistent chat file. The prompt says history is for conversational continuity only, not authoritative evidence; factual answers still depend on the selected video's retrieved transcript evidence or raw transcript fallback.
+
+### Persistent Chat Q&A Integration
+
+**Architecture:** `POST /chats/{chat_id}/messages` authenticates the session owner, loads the chat through owner-scoped storage, requires its `video_id`, and checks that the corresponding in-process video job is complete. It delegates to `VideoAIService.answer_question` with the chat's video ID, so retrieval uses the existing per-video Chroma collection, similarity filter, and raw-transcript fallback. It reuses `VoiceQuestionService.synthesize_answer` for optional answer audio; the existing video answer-audio route serves the WAV.
+
+**Request/response flow:** the request body is `{"question": "..."}`. The endpoint atomically appends the user message before AI work, calls the existing Q&A pipeline with at most three prior chat messages, then appends and returns the assistant message. The response includes `user_message`, `assistant_message`, `sources`, and optional `answer_audio_location`. The assistant record preserves answer text, source text and start/end times, source timestamps, audio reference when generated, and its creation timestamp. A chat without `video_id` returns `400`; unavailable videos return `404`; unfinished jobs return `409`.
+
+**Persistence:** both messages are stored in the owner's existing `data/chats/{username}/{chat_id}.json` using the chat store's atomic replacement. The full ordered conversation is returned by `GET /chats/{chat_id}` after reload; it is not sent in full to Groq. If answering fails after the user message was saved, that user message remains persisted for a retry. TTS failure does not discard the answer; its audio reference is omitted.
+
+**Tests:** `tests/test_chats.py` covers authenticated owned-chat Q&A, both persisted messages, source/timestamp/audio fields, history reload, foreign-owner rejection, unavailable/missing video handling, and only the last three prior messages passed to the AI service. `tests/test_llm.py` verifies chat context truncation without using process-global history. Existing RAG tests cover video collection isolation, similarity thresholds, and raw-transcript fallback; `tests/test_video_processing.py` confirms standalone video Q&A remains operational.
 
 ### `backend/app/services/tts.py`
 

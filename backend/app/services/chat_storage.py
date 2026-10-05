@@ -9,7 +9,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from backend.app.core.config import settings
-from backend.app.schemas.chats import ChatCreate, ChatRecord, ChatUpdate, utc_now
+from backend.app.schemas.chats import ChatCreate, ChatMessage, ChatRecord, ChatUpdate, utc_now
 
 
 CHAT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -87,6 +87,21 @@ class ChatStore:
             updated = ChatRecord.model_validate({**record.model_dump(), **changes})
             self._write(updated)
         return self._load_video_context(updated)
+
+    def append_message(self, username: str, chat_id: str, message: ChatMessage) -> ChatRecord:
+        path = self._chat_path(username, chat_id)
+        with self._lock:
+            record = self._read(path, username)
+            title = record.title
+            if message.role == "user" and title == "New chat":
+                title = message.content.strip()[:80] or title
+            updated = record.model_copy(update={
+                "title": title,
+                "updated_at": utc_now(),
+                "messages": [*record.messages, message],
+            })
+            self._write(updated)
+        return updated
 
     def delete(self, username: str, chat_id: str) -> None:
         path = self._chat_path(username, chat_id)

@@ -105,6 +105,20 @@ def test_conversation_history_is_bounded_and_isolated_by_video(tmp_path: Path) -
     assert "Question B" in prompt_b
 
 
+def test_persistent_chat_history_is_bounded_without_using_video_global_history(tmp_path: Path) -> None:
+    client = FakeCompletions(["chat answer"])
+    service = VideoAIService(llm=GroqLLMService(api_key="test-key", client=client), rag=FakeRAG([]), summary_dir=tmp_path)
+    history = [{"role": "user", "content": f"Chat message {index}"} for index in range(8)]
+
+    service.answer_question("video-a", "Current question", history=history)
+
+    prompt = client.prompts[0]
+    assert "Chat message 5" in prompt and "Chat message 6" in prompt and "Chat message 7" in prompt
+    assert "Chat message 4" not in prompt
+    assert "Current question" in prompt
+    assert service._conversation_for_video("video-a") == []
+
+
 def test_llm_failures_are_normalized() -> None:
     class BrokenCompletions:
         def create(self, **kwargs):

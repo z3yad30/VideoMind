@@ -66,6 +66,13 @@ class ChatUpdate(BaseModel):
         return value
 
 
+class ChatQuestionResponse(BaseModel):
+    user_message: ChatMessage
+    assistant_message: ChatMessage
+    sources: list[ChatSource]
+    answer_audio_location: str | None = None
+
+
 class ChatRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

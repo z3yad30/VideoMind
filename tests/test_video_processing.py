@@ -132,6 +132,27 @@ async def test_question_is_rejected_until_processing_completes(monkeypatch: pyte
     assert response.status_code == 409
 
 
+@pytest.mark.asyncio
+async def test_standalone_video_question_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    class AI:
+        def answer_question(self, video_id: str, question: str):
+            assert (video_id, question) == ("video-1", "What happened?")
+            return {"answer": "A standalone answer", "sources": []}
+
+    monkeypatch.setattr(
+        videos_api,
+        "video_service",
+        SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")),
+    )
+    monkeypatch.setattr(videos_api, "ai_service", AI())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/videos/video-1/question", json={"question": "What happened?"})
+
+    assert response.status_code == 200
+    assert response.json() == {"answer": "A standalone answer", "sources": []}
+
+
 def test_upload_rejects_huge_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(media_module, "settings", SimpleNamespace(max_upload_bytes=3))
     upload = SimpleNamespace(file=BytesIO(b"1234"))
