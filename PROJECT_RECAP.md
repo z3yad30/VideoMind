@@ -12,7 +12,7 @@
 
 The implemented goal is to let a user bring one media source, wait for background processing, inspect its transcript and summary, and ask questions whose answers are grounded in that video's evidence. The system now supports a retrieval-policy gate, a raw transcript fallback pathway, and bounded per-video conversation history so follow-up questions can work without leaking context across videos.
 
-The repository also includes a standalone runtime reset helper, `scripts/vanish.py`, which removes generated processing artifacts from the local `data/` tree without deleting the project itself or other caches. The codebase does not implement accounts, authentication, authorization, multi-tenant isolation, or a relational database. It is a local MVP, not an internet-facing multi-user deployment.
+The repository also includes a standalone runtime reset helper, `scripts/vanish.py`, which removes generated processing artifacts from the local `data/` tree without deleting the project itself or other caches. The backend now implements local username/password accounts and cookie sessions, but does not yet authorize video routes or provide account ownership. There is no relational database. It remains a local MVP, not an internet-facing multi-user deployment.
 
 The frontend `AnswerCard` renders LLM answers with `react-markdown` and `remark-gfm`, preserving the backend Markdown while supporting headings, lists, tables, task lists, code blocks, links, and other GitHub-Flavored Markdown formatting.
 
@@ -20,7 +20,11 @@ The frontend `AnswerCard` renders LLM answers with `react-markdown` and `remark-
 
 | Capability | Main entry point | Responsibility |
 |---|---|---|
-| API startup and routing | `backend/app/main.py` | Creates FastAPI app and includes health/video routers. |
+| API startup and routing | `backend/app/main.py` | Creates FastAPI app and includes auth/health/video routers. |
+| Authentication routes | `backend/app/api/auth.py` | Implements registration, login, current-user, and logout endpoints. |
+| User identity dependency | `backend/app/api/dependencies.py` | Resolves the current request's session cookie for future protected routes. |
+| Authentication and sessions | `backend/app/services/auth.py` | Hashes/verifies passwords and manages expiring in-memory sessions. |
+| User storage | `backend/app/services/user_storage.py` | Reads users and atomically writes `data/users/users.json`. |
 | File ingestion | `backend/app/api/videos.py:upload_video()` | Accepts multipart media, validates extension, saves it under a generated ID, and starts processing. |
 | YouTube ingestion | `backend/app/api/videos.py:process_youtube()` | Validates a YouTube URL, downloads it as a persistent source, and starts background processing. |
 | Source media persistence | `backend/app/services/media.py:MediaService.download_youtube()` / `backend/app/services/video_processing.py` | Saves YouTube downloads to `data/videos/{video_id}{extension}` and keeps them after processing. |
@@ -76,7 +80,7 @@ flowchart TD
 - **AI:** Local `faster-whisper` ASR, local Sentence Transformers embeddings, Groq LLM, and local Windows SAPI TTS.
 - **Background processing:** `asyncio.create_task(asyncio.to_thread(video_service.process, ...))` in `backend/app/api/videos.py`.
 - **Queues/workers:** Not found in codebase.
-- **Authentication/authorization:** Not found in codebase.
+- **Authentication:** Username/password auth exists; users are JSON-backed, passwords are Argon2-hashed, and opaque session IDs are stored in memory. Existing video routes remain public and are not associated with users.
 - **CORS/rate limiting:** Not found in codebase.
 
 ## 3. Complete Project File Map
@@ -89,10 +93,15 @@ flowchart TD
 | `pytest.ini` | Test config | Pytest configuration. | Sets `asyncio_mode = auto`. |
 | `.env` | Local config | Runtime environment values. | Supplies Groq/model/offline settings; contains a credential-shaped key and must not be exposed. |
 | `backend/app/main.py` | Backend entrypoint | Builds the FastAPI application. | Configures logging and registers routers. |
+| `backend/app/api/auth.py` | Route module | Authentication HTTP endpoints. | Implements `POST /auth/register`, `POST /auth/login`, `GET /auth/me`, and `POST /auth/logout`. |
+| `backend/app/api/dependencies.py` | Route dependency | Current-user resolution. | Implements `get_current_user()` for future protected routes using the HTTP-only session cookie. |
 | `backend/app/api/health.py` | Route module | Health endpoint. | Implements `GET /health`. |
 | `backend/app/api/videos.py` | Route module | Video ingestion, status, transcript, summary, Q&A, audio routes. | Owns HTTP validation/response mapping and starts processing tasks. |
 | `backend/app/core/config.py` | Configuration | Loads root `.env` and creates frozen `Settings`. | Defines model, size, timeout, logging, and question limits. |
 | `backend/app/core/logging_config.py` | Configuration | Configures Python logging. | Uses `LOG_LEVEL` and a timestamped format. |
+| `backend/app/schemas/auth.py` | Pydantic schemas | Authentication request/response types. | Normalizes and validates usernames and rejects malformed credentials. |
+| `backend/app/services/auth.py` | Service | Password verification and local sessions. | Uses `pwdlib` Argon2 hashing and process-local sessions with a 12-hour expiry. |
+| `backend/app/services/user_storage.py` | Storage service | User JSON persistence. | Stores hashes in `data/users/users.json` with atomic replacement and handles missing/corrupt files. |
 | `backend/app/schemas/videos.py` | Pydantic schemas | Request/response/status types. | Defines URL validation, question limits, transcript, summary, source, stage, and event shapes. |
 | `backend/app/services/media.py` | Service | Media input, FFmpeg, and YouTube handling. | Validates extensions, streams upload bytes, downloads, extracts audio. |
 | `backend/app/services/asr.py` | Service | ASR abstraction and implementation. | Defines `ASRSegment`, `ASRService`, and lazy model-backed transcription. |
@@ -111,6 +120,7 @@ flowchart TD
 | `frontend/src/styles.css` | Styling | Full frontend visual system/layout. | Responsive ingestion, processing, transcript, summary, Q&A, notices. |
 | `frontend/src/vite-env.d.ts` | Type declarations | Vite environment typing. | Boilerplate declaration file. |
 | `tests/test_health.py` | Tests | Health route test. | Confirms `GET /health`. |
+| `tests/test_auth.py` | Tests | Authentication integration tests. | Registration, duplicate usernames, password hashing, login, session, logout, malformed input, and corrupt storage. |
 | `tests/test_video_processing.py` | Tests | Media/job/API processing tests. | Timestamps, cleanup, events, failures, validation, YouTube, concurrency, artifact IDs. |
 | `tests/test_rag.py` | Tests | RAG tests. | Chunk retrieval, metadata timestamps, isolation, empty/missing collections, backend errors. |
 | `tests/test_llm.py` | Tests | LLM/AI tests. | Model default, prompts, hierarchical summaries, no-context behavior, error normalization. |
@@ -120,6 +130,7 @@ flowchart TD
 | `data/summaries/` | Runtime storage | Summary artifacts. | `{video_id}.json` with fixed summary fields. |
 | `data/audio/` | Runtime storage | Summary and answer WAV files. | Summary audio and answer audio paths. |
 | `data/chroma/` | Runtime storage | Persistent vector store. | Per-video Chroma collections. |
+| `data/users/users.json` | Runtime storage | Local user records. | Normalized usernames and Argon2 password hashes; never stores plaintext passwords. |
 
 Generated dependencies, caches, `__pycache__`, and build output are excluded from this map.
 
@@ -139,17 +150,25 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 **Purpose:** Create the FastAPI application.
 
-**Responsibilities:** Call `configure_logging()`, instantiate `FastAPI(title="AI Video Assistant", version="0.1.0")`, register the health and video routers, and expose the root status route.
+**Responsibilities:** Call `configure_logging()`, instantiate `FastAPI(title="AI Video Assistant", version="0.1.0")`, register the auth, health, and video routers, and expose the root status route.
 
 **Important symbols:** `app`; `root()` returns `{"name": "VideoMind API", "status": "ok", "health": "/health"}`.
 
-**Inputs/outputs:** No request input for startup; HTTP root request produces a JSON health pointer. It depends on `health_router`, `videos_router`, and logging configuration. FastAPI invokes `root()`.
+**Inputs/outputs:** No request input for startup; HTTP root request produces a JSON health pointer. It depends on `auth_router`, `health_router`, `videos_router`, and logging configuration. FastAPI invokes `root()`.
 
 ### `backend/app/api/health.py`
 
 **Purpose:** Lightweight liveness check.
 
 **Important symbol:** `health_check()` handles `GET /health` and returns `{"status": "ok"}`.
+
+### Authentication modules
+
+- `backend/app/api/auth.py` defines registration, login, authenticated-user, and logout routes. Responses expose only the normalized username; login places a session ID in an HTTP-only, SameSite=Lax cookie.
+- `backend/app/api/dependencies.py` defines `get_current_user()` and returns `401` when the request has no valid session.
+- `backend/app/schemas/auth.py` validates non-empty passwords and normalizes case-insensitive usernames to lowercase. Allowed usernames contain 1-32 ASCII letters, numbers, dots, underscores, or hyphens.
+- `backend/app/services/auth.py` uses `pwdlib` Argon2 hashes and maintains random session IDs in process memory. Sessions expire after 12 hours and are removed on logout.
+- `backend/app/services/user_storage.py` persists `{ "users": [...] }` in `data/users/users.json`. Writes use a temporary file, flush/fsync, and `os.replace`; missing files start as an empty store and malformed files fail closed with a service-unavailable response.
 
 ### `backend/app/api/videos.py`
 
@@ -576,6 +595,10 @@ Click microphone
 |---|---|---|---|
 | `GET` | `/` | `main.root()` | API identity/status JSON. |
 | `GET` | `/health` | `health.health_check()` | `{"status":"ok"}`. |
+| `POST` | `/auth/register` | `register()` | Creates a unique account; returns username only (`201`). |
+| `POST` | `/auth/login` | `login()` | Verifies credentials and sets an HTTP-only session cookie (`200`). |
+| `GET` | `/auth/me` | `get_me()` | Returns the authenticated username (`401` without a valid session). |
+| `POST` | `/auth/logout` | `logout()` | Invalidates the session and clears the cookie (`204`). |
 | `POST` | `/videos/upload` | `upload_video()` | Multipart file; `202` queued job. |
 | `POST` | `/videos/youtube` | `process_youtube()` | JSON YouTube URL; `202` queued job. |
 | `GET` | `/videos/{video_id}/status` | `get_video_status()` | Current process-local job, error, timestamp, stages. |
@@ -596,6 +619,7 @@ The README API plan lists `GET /videos/{video_id}`, but this route is **not impl
 - `409`: transcript/summary/audio/question requested before completion, or missing ready artifact.
 - `422`: Pydantic URL/question validation.
 - `503`: runtime LLM/TTS/service failures surfaced by routes.
+- Authentication uses `409` for duplicate usernames, `401` for invalid login or missing session, `422` for malformed credentials, and `503` when user storage is unreadable/corrupt.
 
 ## 9. Data Flow
 
@@ -642,6 +666,8 @@ Important formats:
 | `data/audio/summaries/` | `{video_id}.wav`. | `generate_summary_audio()` writes; summary audio route reads. |
 | `data/audio/answers/{video_id}/` | `{answer_id}.wav`. | `VoiceQuestionService.answer()` writes; answer audio route reads. |
 | `data/chroma/` | Persistent Chroma data. | `TranscriptRAGService` creates persistent client/collections. |
+| `data/users/users.json` | Normalized usernames and Argon2 password hashes. | Authentication service reads/writes via `UserStore`; atomic file replacement. |
+| Backend memory | Session ID to username/expiry map. | Auth service creates, checks, expires, and invalidates sessions; lost on process restart. |
 | Browser `localStorage` | Current `video_id` under `videomind.videoId`. | `App` writes on submission, reads on mount, removes on reset. |
 | Browser object URL | Local preview only. | `chooseFile()` creates; cleanup revokes. |
 
@@ -740,11 +766,11 @@ No Docker, CI, cloud object store, queue, worker framework, or deployment config
 
 These are observations, not implemented functionality:
 
-- No authentication or authorization.
+- Video routes are not protected by authentication and there is no account ownership or authorization boundary.
 - No tenant isolation beyond unguessable IDs.
 - No rate limiting or quota controls.
 - No CORS policy found.
-- No CSRF strategy found.
+- Authentication sessions are process-local, expire after 12 hours, and are invalidated on backend restart. The cookie is configured for local HTTP (`secure=False`); production HTTPS deployment needs secure cookie configuration and a deployment-appropriate CSRF strategy.
 - Upload validation checks extensions but does not independently sniff MIME/content.
 - No durable job ownership or access checks.
 - Some provider/library error text can be returned directly in HTTP 503 or job status messages.
@@ -762,7 +788,7 @@ PowerShell: uvicorn backend.app.main:app --reload
 -> config.py loads .env and creates settings
 -> main.py calls configure_logging()
 -> FastAPI app is created
--> health and videos routers are included
+-> auth, health, and videos routers are included
 -> shared service objects are instantiated during videos.py import
 -> Uvicorn serves port 8000 by default
 ```
@@ -867,7 +893,7 @@ This is the primary interactive AI path.
 ### Confirmed incomplete or absent
 
 - `GET /videos/{video_id}` is in the README API plan but absent from `videos.py`.
-- No auth, authorization, accounts, logout, tenant model, or permissions.
+- No video-route authentication enforcement, account ownership, tenant model, or per-user permissions.
 - No relational database/ORM/migrations.
 - No durable job queue or job persistence.
 - No frontend automated test suite found.
@@ -917,7 +943,7 @@ Process one audio/video source into a timestamped transcript, searchable per-vid
 
 ### Storage
 
-Local JSON under `data/transcripts` and `data/summaries`, WAV under `data/audio`, Chroma under `data/chroma`, temporary/source media under `data/videos`, and current ID in browser localStorage.
+Local JSON under `data/transcripts`, `data/summaries`, and `data/users/users.json`; WAV under `data/audio`, Chroma under `data/chroma`, temporary/source media under `data/videos`, and current video ID in browser localStorage. Authentication credentials are never stored in frontend localStorage.
 
 ### How to run
 
@@ -945,6 +971,7 @@ python -m pytest
 4. Typed question → video-scoped retrieval → grounded Groq answer → timestamp sources.
 5. Voice recording → Whisper question → same RAG/LLM path → TTS answer WAV.
 6. Processing stages → in-memory events → SSE → frontend activity UI.
+7. Registration/login → Argon2 password verification → HTTP-only session cookie → `/auth/me`; logout removes the server-side session and cookie.
 
 ## 22. If I Forgot Everything
 
@@ -954,4 +981,25 @@ After transcription, the backend chunks the transcript and embeds it into a pers
 
 The frontend mental model is one main React component: `App` starts ingestion, saves the current ID in localStorage, subscribes to `/events` with `EventSource`, reloads status/transcript/summary, displays processing stages, and provides transcript timestamp buttons, summary audio, typed questions, and browser microphone recording. Local uploads preview directly from a browser object URL, while completed YouTube videos load from the backend route `/videos/{video_id}/media` so playback and timestamp jumping work after processing completes without exposing arbitrary filesystem paths.
 
-The most important backend files are `backend/app/api/videos.py` for the HTTP boundary, `backend/app/services/video_processing.py` for orchestration and process-local jobs, `media.py` for FFmpeg/yt-dlp, `asr.py` for Whisper, `rag.py` for Chroma, `llm.py` for Groq/summaries/Q&A, `voice.py` for spoken questions, and `tts.py` for audio. There is no relational database, auth, durable queue, multi-user ownership, or production deployment layer. Job state disappears on restart even when artifacts remain. Before changing the project, preserve video IDs/timestamp metadata, remember that all result routes require an in-memory completed job, keep Q&A video-scoped, and check the frontend/backend processing-status type drift. Treat the local Groq credential as compromised and rotate it before normal use.
+The most important backend files are `backend/app/api/videos.py` for the video HTTP boundary, `backend/app/api/auth.py` and `backend/app/services/auth.py` for authentication, `backend/app/services/user_storage.py` for user persistence, `backend/app/services/video_processing.py` for orchestration and process-local jobs, `media.py` for FFmpeg/yt-dlp, `asr.py` for Whisper, `rag.py` for Chroma, `llm.py` for Groq/summaries/Q&A, `voice.py` for spoken questions, and `tts.py` for audio. There is no relational database, durable queue, multi-user ownership, or production deployment layer. Sessions and job state disappear on restart even when artifacts remain. Before changing the project, preserve video IDs/timestamp metadata, remember that all result routes require an in-memory completed job, keep Q&A video-scoped, and check the frontend/backend processing-status type drift. Treat the local Groq credential as compromised and rotate it before normal use.
+
+## 23. Completed Phase: Authentication Foundation
+
+### Delivered modules
+
+- `backend/app/api/auth.py`: `POST /auth/register`, `POST /auth/login`, `GET /auth/me`, and `POST /auth/logout`.
+- `backend/app/api/dependencies.py`: reusable `get_current_user()` dependency.
+- `backend/app/schemas/auth.py`: strict credential validation and public user response schema.
+- `backend/app/services/auth.py`: Argon2 password hashing/verification and expiring session management.
+- `backend/app/services/user_storage.py`: atomic JSON user storage with missing/corrupt-file handling.
+- `tests/test_auth.py`: registration, duplicate usernames, password hashing, login failures, session inspection, logout, malformed input, response secrecy, and corrupted-storage tests.
+
+### Storage and security
+
+Users live at `data/users/users.json`; records contain normalized usernames and Argon2 hashes only. Writes use a temporary sibling file and atomic replacement. Authentication uses random session identifiers in an HTTP-only, SameSite=Lax cookie, expiring after 12 hours. Sessions live in process memory, are removed on logout, and are invalidated by backend restart. Registration/login responses never expose hashes, and credentials are accepted only in JSON request bodies.
+
+The new dependency is `pwdlib[argon2]`. No database was added. Existing video routes remain unprotected by design; no frontend login UI or video ownership model was introduced. The cookie uses `secure=False` for local HTTP and must be hardened with HTTPS before any production deployment.
+
+### Validation
+
+`python -m pytest tests/test_auth.py -q` passed all 9 auth tests after installing the dependency into the project virtual environment. A live Uvicorn HTTP smoke test also passed health, registration, login, `/auth/me`, and logout using a temporary user store.

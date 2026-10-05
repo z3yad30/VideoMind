@@ -2,7 +2,7 @@
 
 VideoMind is a local-first MVP for uploading media or processing an authorized YouTube URL, transcribing it, generating a grounded summary, and answering text or voice questions about that specific video.
 
-The backend and Vite frontend are implemented. The current deployment model is a single Windows-hosted process with local filesystem artifacts.
+The backend and Vite frontend are implemented. The backend now includes local username/password registration and login with cookie-based sessions. The current deployment model is a single Windows-hosted process with local filesystem artifacts.
 
 ## Architecture
 
@@ -22,7 +22,7 @@ The pipeline is:
 
 The important behavior change is that YouTube downloads are no longer temporary: the saved source remains in `data/videos/` after processing completes and is served through the backend media route for playback.
 
-The backend uses FastAPI and Uvicorn. Route handlers remain thin; processing, ASR, media, embedding, vector-store, LLM, and TTS responsibilities live in service modules.
+The backend uses FastAPI and Uvicorn. Route handlers remain thin; authentication, user storage, processing, ASR, media, embedding, vector-store, LLM, and TTS responsibilities live in separate modules.
 
 ## Technologies
 
@@ -41,7 +41,7 @@ The backend uses FastAPI and Uvicorn. Route handlers remain thin; processing, AS
 ```text
 backend/app/       API, services, models, schemas, core, utilities, database
 frontend/           Frontend application (next implementation phase)
-data/               Local runtime media, transcript, summary, and Chroma storage
+data/               Local runtime media, transcript, summary, Chroma, and user storage
 tests/              Unit and integration tests
 .venv/              Project-root Python virtual environment
 requirements.txt    Runtime and test dependencies
@@ -99,6 +99,19 @@ Start the backend with:
 uvicorn backend.app.main:app --reload
 ```
 
+## Authentication
+
+The backend provides username/password registration, login, session inspection, and logout:
+
+- `POST /auth/register` accepts `{"username": "...", "password": "..."}` and returns the normalized username. Usernames are 1-32 letters, numbers, dots, underscores, or hyphens; they are case-insensitive. Empty credentials and unexpected fields are rejected.
+- `POST /auth/login` accepts the same input and sets an HTTP-only, SameSite=Lax session cookie. Invalid usernames and passwords receive the same response.
+- `GET /auth/me` returns the authenticated username and responds with `401` when no valid session exists.
+- `POST /auth/logout` invalidates the current session and clears its cookie.
+
+Users are stored in `data/users/users.json`. Passwords are hashed with Argon2 through `pwdlib`; plaintext passwords and password hashes are not returned by the API. User-file updates use an atomic temporary-file replacement, and missing user storage is initialized automatically. Authentication does not use a database or frontend localStorage.
+
+Sessions are random server-side identifiers in an HTTP-only cookie and expire after 12 hours. Session state is in memory, so restarting the backend invalidates all sessions. This is a local MVP foundation: the existing video routes are not protected, accounts do not own or isolate videos, there is no frontend login UI, and the cookie is configured for local HTTP rather than HTTPS. Do not expose this service to the public internet as-is.
+
 ## Running the Frontend
 
 From the project root in PowerShell:
@@ -131,6 +144,8 @@ This command targets the project’s local runtime storage under `data/` and rem
 
 It preserves the `data/` directory itself and keeps the expected runtime folders in place so the project can regenerate data cleanly.
 
+The cleanup allowlist does not include `data/users/`, so registered accounts are retained.
+
 ### What Vanish preserves
 
 Vanish does not delete:
@@ -156,7 +171,16 @@ Vanish is a standalone command-line utility. It does not require the FastAPI ser
 python scripts/vanish.py
 ```
 
-## API Plan
+## API Surface
+
+Authentication endpoints:
+
+- `POST /auth/register`
+- `POST /auth/login`
+- `GET /auth/me`
+- `POST /auth/logout`
+
+Video endpoints:
 
 The planned REST surface is:
 
@@ -210,7 +234,7 @@ Typed and spoken questions share the same video-scoped retrieval, raw transcript
 
 ## Testing
 
-The test suite will cover video ID generation, segment-aware chunking, timestamp preservation, collection isolation, retrieval, LLM prompts, request validation, missing environment variables, malformed inputs, and one end-to-end flow with mocked external services. Tests will run without a real Groq API key or network access.
+The test suite covers authentication registration/login/session behavior and password hashing, as well as video ID generation, segment-aware chunking, timestamp preservation, collection isolation, retrieval, LLM prompts, request validation, malformed inputs, and flows with mocked external services. Tests run without a real Groq API key.
 
 The implemented command is:
 
@@ -224,7 +248,7 @@ The current suite verifies retrieval thresholds, raw transcript fallback, voice 
 ## Current limitations
 
 - Job status is in memory and `BackgroundTasks` is process-local. A restart loses status, and multiple workers do not share jobs.
-- There is no authentication, authorization, tenant isolation, rate limiting, or durable job queue. This is not ready for an internet-facing multi-user deployment.
+- Authentication is implemented, but video routes are not protected, accounts do not have video ownership or tenant isolation, and there is no rate limiting or durable job queue. Sessions are process-local and the cookie is configured for local HTTP. This is not ready for an internet-facing multi-user deployment.
 - ChromaDB, transcripts, summaries, and audio use local filesystem storage. Use a database/object store and isolated vector namespaces for multi-instance deployment.
 - ASR, embeddings, Groq, FFmpeg, and Windows SAPI TTS are blocking and resource-intensive. Production deployment needs bounded worker pools, retries, quotas, and retention cleanup.
 
