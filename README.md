@@ -2,7 +2,7 @@
 
 VideoMind is a local-first MVP for uploading media or processing an authorized YouTube URL, transcribing it, generating a grounded summary, and answering text or voice questions about that specific video.
 
-The backend and Vite frontend are implemented. The backend now includes local username/password registration and login with cookie-based sessions. The current deployment model is a single Windows-hosted process with local filesystem artifacts.
+The backend and Vite frontend are implemented. The backend includes local username/password registration and login with cookie-based sessions, plus persistent user-owned chats. The current deployment model is a single Windows-hosted process with local filesystem artifacts.
 
 ## Architecture
 
@@ -41,7 +41,7 @@ The backend uses FastAPI and Uvicorn. Route handlers remain thin; authentication
 ```text
 backend/app/       API, services, models, schemas, core, utilities, database
 frontend/           Frontend application (next implementation phase)
-data/               Local runtime media, transcript, summary, Chroma, and user storage
+data/               Local runtime media, transcript, summary, Chroma, chat, and user storage
 tests/              Unit and integration tests
 .venv/              Project-root Python virtual environment
 requirements.txt    Runtime and test dependencies
@@ -110,7 +110,23 @@ The backend provides username/password registration, login, session inspection, 
 
 Users are stored in `data/users/users.json`. Passwords are hashed with Argon2 through `pwdlib`; plaintext passwords and password hashes are not returned by the API. User-file updates use an atomic temporary-file replacement, and missing user storage is initialized automatically. Authentication does not use a database or frontend localStorage.
 
-Sessions are random server-side identifiers in an HTTP-only cookie and expire after 12 hours. Session state is in memory, so restarting the backend invalidates all sessions. This is a local MVP foundation: the existing video routes are not protected, accounts do not own or isolate videos, there is no frontend login UI, and the cookie is configured for local HTTP rather than HTTPS. Do not expose this service to the public internet as-is.
+Sessions are random server-side identifiers in an HTTP-only cookie and expire after 12 hours. Session state is in memory, so restarting the backend invalidates all sessions. Chat routes require this authenticated session and chats are isolated by owner. Video routes are still public and videos are not account-owned; there is no frontend login UI, and the cookie is configured for local HTTP rather than HTTPS. Do not expose this service to the public internet as-is.
+
+## Persistent Chat Storage
+
+Chats are stored independently as JSON files under `data/chats/{username}/{chat_id}.json`. The API creates directories automatically and uses atomic replacement when updating a file. A chat record contains its ID and owner, title, creation/update timestamps, optional video ID and metadata, summary/transcript fields, and the complete ordered message history. Messages preserve IDs, roles, content, timestamps, and optional assistant sources, evidence timestamps, and answer-audio references.
+
+When an associated video has canonical artifacts, chat detail responses restore summary data from `data/summaries/{video_id}.json` and transcript data from `data/transcripts/{video_id}.json`. These potentially large artifacts are referenced through the video ID rather than copied into every chat file unless explicitly supplied in chat content. Files remain scoped to the authenticated username; client-provided usernames are rejected as identity, and unknown or foreign chat IDs return `404`. Chat IDs are server-generated 32-character lowercase hexadecimal identifiers and path-like IDs are rejected. Malformed chat JSON fails closed with `503` without returning filesystem paths.
+
+Chat API (all endpoints require the HTTP-only authenticated session cookie):
+
+- `GET /chats` lists the current user's chats, newest activity first.
+- `POST /chats` creates a chat and returns its generated `chat_id`.
+- `GET /chats/{chat_id}` returns one owned chat and resolves available video context.
+- `PUT /chats/{chat_id}` updates chat metadata/content, including the complete message list when supplied.
+- `DELETE /chats/{chat_id}` deletes an owned chat and returns `204`.
+
+Persistent chat history is separate from LLM conversation context. Saving a full conversation does not send it to Groq: the existing video-scoped RAG path and its bounded recent-context behavior remain unchanged. Chat files are user data and are not removed by the Vanish runtime cleanup utility.
 
 ## Running the Frontend
 
@@ -180,6 +196,14 @@ Authentication endpoints:
 - `GET /auth/me`
 - `POST /auth/logout`
 
+Chat endpoints (authenticated):
+
+- `GET /chats`
+- `POST /chats`
+- `GET /chats/{chat_id}`
+- `PUT /chats/{chat_id}`
+- `DELETE /chats/{chat_id}`
+
 Video endpoints:
 
 The planned REST surface is:
@@ -234,7 +258,7 @@ Typed and spoken questions share the same video-scoped retrieval, raw transcript
 
 ## Testing
 
-The test suite covers authentication registration/login/session behavior and password hashing, as well as video ID generation, segment-aware chunking, timestamp preservation, collection isolation, retrieval, LLM prompts, request validation, malformed inputs, and flows with mocked external services. Tests run without a real Groq API key.
+The test suite covers authentication registration/login/session behavior and password hashing, persistent chat CRUD/list/reload and ownership isolation, as well as video ID generation, segment-aware chunking, timestamp preservation, collection isolation, retrieval, LLM prompts, request validation, malformed inputs, and flows with mocked external services. Tests run without a real Groq API key.
 
 The implemented command is:
 
@@ -248,7 +272,7 @@ The current suite verifies retrieval thresholds, raw transcript fallback, voice 
 ## Current limitations
 
 - Job status is in memory and `BackgroundTasks` is process-local. A restart loses status, and multiple workers do not share jobs.
-- Authentication is implemented, but video routes are not protected, accounts do not have video ownership or tenant isolation, and there is no rate limiting or durable job queue. Sessions are process-local and the cookie is configured for local HTTP. This is not ready for an internet-facing multi-user deployment.
+- Authentication protects chat storage, but video routes are not protected and accounts do not have video ownership. There is no rate limiting or durable job queue. Sessions are process-local and the cookie is configured for local HTTP. This is not ready for an internet-facing multi-user deployment.
 - ChromaDB, transcripts, summaries, and audio use local filesystem storage. Use a database/object store and isolated vector namespaces for multi-instance deployment.
 - ASR, embeddings, Groq, FFmpeg, and Windows SAPI TTS are blocking and resource-intensive. Production deployment needs bounded worker pools, retries, quotas, and retention cleanup.
 

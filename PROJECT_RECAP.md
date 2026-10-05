@@ -12,7 +12,7 @@
 
 The implemented goal is to let a user bring one media source, wait for background processing, inspect its transcript and summary, and ask questions whose answers are grounded in that video's evidence. The system now supports a retrieval-policy gate, a raw transcript fallback pathway, and bounded per-video conversation history so follow-up questions can work without leaking context across videos.
 
-The repository also includes a standalone runtime reset helper, `scripts/vanish.py`, which removes generated processing artifacts from the local `data/` tree without deleting the project itself or other caches. The backend now implements local username/password accounts and cookie sessions, but does not yet authorize video routes or provide account ownership. There is no relational database. It remains a local MVP, not an internet-facing multi-user deployment.
+The repository also includes a standalone runtime reset helper, `scripts/vanish.py`, which removes generated processing artifacts from the local `data/` tree without deleting the project itself or other caches. The backend implements local username/password accounts, cookie sessions, and persistent per-user chat ownership. Video routes remain public and are not account-owned. There is no relational database. It remains a local MVP, not an internet-facing multi-user deployment.
 
 The frontend `AnswerCard` renders LLM answers with `react-markdown` and `remark-gfm`, preserving the backend Markdown while supporting headings, lists, tables, task lists, code blocks, links, and other GitHub-Flavored Markdown formatting.
 
@@ -20,11 +20,13 @@ The frontend `AnswerCard` renders LLM answers with `react-markdown` and `remark-
 
 | Capability | Main entry point | Responsibility |
 |---|---|---|
-| API startup and routing | `backend/app/main.py` | Creates FastAPI app and includes auth/health/video routers. |
+| API startup and routing | `backend/app/main.py` | Creates FastAPI app and includes auth/chat/health/video routers. |
 | Authentication routes | `backend/app/api/auth.py` | Implements registration, login, current-user, and logout endpoints. |
-| User identity dependency | `backend/app/api/dependencies.py` | Resolves the current request's session cookie for future protected routes. |
+| User identity dependency | `backend/app/api/dependencies.py` | Resolves the current request's session cookie for protected chat routes. |
 | Authentication and sessions | `backend/app/services/auth.py` | Hashes/verifies passwords and manages expiring in-memory sessions. |
 | User storage | `backend/app/services/user_storage.py` | Reads users and atomically writes `data/users/users.json`. |
+| Persistent chat API | `backend/app/api/chats.py` | Authenticated chat CRUD; derives owner only from the session identity. |
+| Chat schemas/storage | `backend/app/schemas/chats.py`, `backend/app/services/chat_storage.py` | Validates chat payloads and atomically stores one JSON file per chat under its username. |
 | File ingestion | `backend/app/api/videos.py:upload_video()` | Accepts multipart media, validates extension, saves it under a generated ID, and starts processing. |
 | YouTube ingestion | `backend/app/api/videos.py:process_youtube()` | Validates a YouTube URL, downloads it as a persistent source, and starts background processing. |
 | Source media persistence | `backend/app/services/media.py:MediaService.download_youtube()` / `backend/app/services/video_processing.py` | Saves YouTube downloads to `data/videos/{video_id}{extension}` and keeps them after processing. |
@@ -80,7 +82,7 @@ flowchart TD
 - **AI:** Local `faster-whisper` ASR, local Sentence Transformers embeddings, Groq LLM, and local Windows SAPI TTS.
 - **Background processing:** `asyncio.create_task(asyncio.to_thread(video_service.process, ...))` in `backend/app/api/videos.py`.
 - **Queues/workers:** Not found in codebase.
-- **Authentication:** Username/password auth exists; users are JSON-backed, passwords are Argon2-hashed, and opaque session IDs are stored in memory. Existing video routes remain public and are not associated with users.
+- **Authentication:** Username/password auth exists; users are JSON-backed, passwords are Argon2-hashed, and opaque session IDs are stored in memory. Chat routes use the authenticated identity for per-user storage; existing video routes remain public and are not associated with users.
 - **CORS/rate limiting:** Not found in codebase.
 
 ## 3. Complete Project File Map
@@ -92,16 +94,19 @@ flowchart TD
 | `requirements.txt` | Configuration | Python runtime/test dependencies. | FastAPI, ASR, yt-dlp, Chroma, embeddings, Groq, TTS, pytest. |
 | `pytest.ini` | Test config | Pytest configuration. | Sets `asyncio_mode = auto`. |
 | `.env` | Local config | Runtime environment values. | Supplies Groq/model/offline settings; contains a credential-shaped key and must not be exposed. |
-| `backend/app/main.py` | Backend entrypoint | Builds the FastAPI application. | Configures logging and registers routers. |
+| `backend/app/main.py` | Backend entrypoint | Builds the FastAPI application. | Configures logging and registers auth, chat, health, and video routers. |
 | `backend/app/api/auth.py` | Route module | Authentication HTTP endpoints. | Implements `POST /auth/register`, `POST /auth/login`, `GET /auth/me`, and `POST /auth/logout`. |
-| `backend/app/api/dependencies.py` | Route dependency | Current-user resolution. | Implements `get_current_user()` for future protected routes using the HTTP-only session cookie. |
+| `backend/app/api/dependencies.py` | Route dependency | Current-user resolution. | Implements `get_current_user()` for protected chat routes using the HTTP-only session cookie. |
+| `backend/app/api/chats.py` | Route module | Persistent chat HTTP endpoints. | Implements authenticated list/create/read/update/delete operations. |
 | `backend/app/api/health.py` | Route module | Health endpoint. | Implements `GET /health`. |
 | `backend/app/api/videos.py` | Route module | Video ingestion, status, transcript, summary, Q&A, audio routes. | Owns HTTP validation/response mapping and starts processing tasks. |
 | `backend/app/core/config.py` | Configuration | Loads root `.env` and creates frozen `Settings`. | Defines model, size, timeout, logging, and question limits. |
 | `backend/app/core/logging_config.py` | Configuration | Configures Python logging. | Uses `LOG_LEVEL` and a timestamped format. |
 | `backend/app/schemas/auth.py` | Pydantic schemas | Authentication request/response types. | Normalizes and validates usernames and rejects malformed credentials. |
+| `backend/app/schemas/chats.py` | Pydantic schemas | Chat request/response types. | Validates chat metadata and message/source/audio fields. |
 | `backend/app/services/auth.py` | Service | Password verification and local sessions. | Uses `pwdlib` Argon2 hashing and process-local sessions with a 12-hour expiry. |
 | `backend/app/services/user_storage.py` | Storage service | User JSON persistence. | Stores hashes in `data/users/users.json` with atomic replacement and handles missing/corrupt files. |
+| `backend/app/services/chat_storage.py` | Storage service | Per-user chat JSON persistence. | Stores each chat independently with atomic replacement, identifier validation, and owner-scoped lookup. |
 | `backend/app/schemas/videos.py` | Pydantic schemas | Request/response/status types. | Defines URL validation, question limits, transcript, summary, source, stage, and event shapes. |
 | `backend/app/services/media.py` | Service | Media input, FFmpeg, and YouTube handling. | Validates extensions, streams upload bytes, downloads, extracts audio. |
 | `backend/app/services/asr.py` | Service | ASR abstraction and implementation. | Defines `ASRSegment`, `ASRService`, and lazy model-backed transcription. |
@@ -121,6 +126,7 @@ flowchart TD
 | `frontend/src/vite-env.d.ts` | Type declarations | Vite environment typing. | Boilerplate declaration file. |
 | `tests/test_health.py` | Tests | Health route test. | Confirms `GET /health`. |
 | `tests/test_auth.py` | Tests | Authentication integration tests. | Registration, duplicate usernames, password hashing, login, session, logout, malformed input, and corrupt storage. |
+| `tests/test_chats.py` | Tests | Chat API/storage integration tests. | CRUD/list, persistence reload, ownership enforcement, malformed JSON, and unsafe IDs. |
 | `tests/test_video_processing.py` | Tests | Media/job/API processing tests. | Timestamps, cleanup, events, failures, validation, YouTube, concurrency, artifact IDs. |
 | `tests/test_rag.py` | Tests | RAG tests. | Chunk retrieval, metadata timestamps, isolation, empty/missing collections, backend errors. |
 | `tests/test_llm.py` | Tests | LLM/AI tests. | Model default, prompts, hierarchical summaries, no-context behavior, error normalization. |
@@ -131,6 +137,7 @@ flowchart TD
 | `data/audio/` | Runtime storage | Summary and answer WAV files. | Summary audio and answer audio paths. |
 | `data/chroma/` | Runtime storage | Persistent vector store. | Per-video Chroma collections. |
 | `data/users/users.json` | Runtime storage | Local user records. | Normalized usernames and Argon2 password hashes; never stores plaintext passwords. |
+| `data/chats/{username}/{chat_id}.json` | Runtime storage | One persistent chat per JSON file, grouped by authenticated username. | Complete message history and chat metadata; video ID links to canonical transcript/summary artifacts. |
 
 Generated dependencies, caches, `__pycache__`, and build output are excluded from this map.
 
@@ -150,7 +157,7 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 **Purpose:** Create the FastAPI application.
 
-**Responsibilities:** Call `configure_logging()`, instantiate `FastAPI(title="AI Video Assistant", version="0.1.0")`, register the auth, health, and video routers, and expose the root status route.
+**Responsibilities:** Call `configure_logging()`, instantiate `FastAPI(title="AI Video Assistant", version="0.1.0")`, register the auth, chat, health, and video routers, and expose the root status route.
 
 **Important symbols:** `app`; `root()` returns `{"name": "VideoMind API", "status": "ok", "health": "/health"}`.
 
@@ -244,7 +251,7 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 **Inputs:** Transcript chunks/questions, summary JSON, conversation history, settings, injectable LLM/RAG/TTS. **Outputs:** Fixed-field summary, summary JSON/WAV, grounded answer, and timestamp sources. **Calls:** Groq chat completions lazily, Chroma via RAG, `Pyttsx3TTSService` by default. **Called by:** processing and API routes.
 
-**Conversation policy:** history is stored per `video_id` and capped at the latest 3 prior messages before the current user question. The prompt explicitly says that history provides conversational context only, not authoritative evidence. Previous assistant messages are used to resolve references like pronouns, but the factual answer still depends on the current video's retrieved transcript evidence or raw transcript fallback.
+**Conversation policy:** the LLM service keeps a process-local history per `video_id` and sends at most the latest 3 prior messages before the current user question. This bounded LLM context is separate from persistent chat files: saved full chat history is not automatically loaded into Groq. The prompt explicitly says that context provides conversational continuity only, not authoritative evidence. Previous assistant messages may resolve references, but factual answers still depend on the current video's retrieved transcript evidence or raw transcript fallback.
 
 ### `backend/app/services/tts.py`
 
@@ -335,6 +342,8 @@ The fallback is not a generic `cannot determine` shortcut. The LLM receives boun
 ### Conversation history behavior
 
 The conversation is scoped to `video_id` and bounded to the most recent 3 prior messages before the current question. The current user question remains separate. Voice and typed questions both append to the same conversation log for the same video. The prompt explicitly tells the model that prior messages are conversational context only and may not be treated as independent facts unless they are supported by the supplied evidence.
+
+This in-memory LLM conversation log is not the durable chat store. Chat CRUD persists complete messages per authenticated user, and none of that saved history is automatically passed to Groq; the existing three-prior-message limit and video-scoped RAG evidence behavior remain unchanged.
 
 ## 6. Service-by-Service Functional Flows
 
@@ -599,6 +608,11 @@ Click microphone
 | `POST` | `/auth/login` | `login()` | Verifies credentials and sets an HTTP-only session cookie (`200`). |
 | `GET` | `/auth/me` | `get_me()` | Returns the authenticated username (`401` without a valid session). |
 | `POST` | `/auth/logout` | `logout()` | Invalidates the session and clears the cookie (`204`). |
+| `GET` | `/chats` | `list_chats()` | Lists the authenticated user's chats. |
+| `POST` | `/chats` | `create_chat()` | Creates one user-owned chat JSON file (`201`). |
+| `GET` | `/chats/{chat_id}` | `get_chat()` | Reads an owned chat and resolves available video context; foreign IDs return `404`. |
+| `PUT` | `/chats/{chat_id}` | `update_chat()` | Updates metadata and/or complete message content for an owned chat. |
+| `DELETE` | `/chats/{chat_id}` | `delete_chat()` | Deletes an owned chat (`204`). |
 | `POST` | `/videos/upload` | `upload_video()` | Multipart file; `202` queued job. |
 | `POST` | `/videos/youtube` | `process_youtube()` | JSON YouTube URL; `202` queued job. |
 | `GET` | `/videos/{video_id}/status` | `get_video_status()` | Current process-local job, error, timestamp, stages. |
@@ -620,6 +634,7 @@ The README API plan lists `GET /videos/{video_id}`, but this route is **not impl
 - `422`: Pydantic URL/question validation.
 - `503`: runtime LLM/TTS/service failures surfaced by routes.
 - Authentication uses `409` for duplicate usernames, `401` for invalid login or missing session, `422` for malformed credentials, and `503` when user storage is unreadable/corrupt.
+- Chat routes require `get_current_user()`; missing sessions return `401`, invalid IDs return `422`, foreign/missing chat IDs return `404`, and malformed chat JSON returns `503` without filesystem details.
 
 ## 9. Data Flow
 
@@ -667,6 +682,7 @@ Important formats:
 | `data/audio/answers/{video_id}/` | `{answer_id}.wav`. | `VoiceQuestionService.answer()` writes; answer audio route reads. |
 | `data/chroma/` | Persistent Chroma data. | `TranscriptRAGService` creates persistent client/collections. |
 | `data/users/users.json` | Normalized usernames and Argon2 password hashes. | Authentication service reads/writes via `UserStore`; atomic file replacement. |
+| `data/chats/{username}/{chat_id}.json` | Chat metadata and complete message history, including assistant evidence/audio references. | `ChatStore`; one atomic JSON file per chat, scoped to the authenticated username. Detail reads resolve canonical transcript/summary JSON by video ID without copying large artifacts into each chat. |
 | Backend memory | Session ID to username/expiry map. | Auth service creates, checks, expires, and invalidates sessions; lost on process restart. |
 | Browser `localStorage` | Current `video_id` under `videomind.videoId`. | `App` writes on submission, reads on mount, removes on reset. |
 | Browser object URL | Local preview only. | `chooseFile()` creates; cleanup revokes. |
@@ -766,8 +782,8 @@ No Docker, CI, cloud object store, queue, worker framework, or deployment config
 
 These are observations, not implemented functionality:
 
-- Video routes are not protected by authentication and there is no account ownership or authorization boundary.
-- No tenant isolation beyond unguessable IDs.
+- Video routes are not protected by authentication and have no account ownership boundary. Chat storage is owner-scoped, but that does not authorize related video routes.
+- No tenant isolation for video jobs or artifacts beyond their generated IDs.
 - No rate limiting or quota controls.
 - No CORS policy found.
 - Authentication sessions are process-local, expire after 12 hours, and are invalidated on backend restart. The cookie is configured for local HTTP (`secure=False`); production HTTPS deployment needs secure cookie configuration and a deployment-appropriate CSRF strategy.
@@ -943,7 +959,7 @@ Process one audio/video source into a timestamped transcript, searchable per-vid
 
 ### Storage
 
-Local JSON under `data/transcripts`, `data/summaries`, and `data/users/users.json`; WAV under `data/audio`, Chroma under `data/chroma`, temporary/source media under `data/videos`, and current video ID in browser localStorage. Authentication credentials are never stored in frontend localStorage.
+Local JSON under `data/transcripts`, `data/summaries`, `data/users/users.json`, and per-user `data/chats/{username}/{chat_id}.json`; WAV under `data/audio`, Chroma under `data/chroma`, temporary/source media under `data/videos`, and current video ID in browser localStorage. Authentication credentials are never stored in frontend localStorage.
 
 ### How to run
 
@@ -981,7 +997,7 @@ After transcription, the backend chunks the transcript and embeds it into a pers
 
 The frontend mental model is one main React component: `App` starts ingestion, saves the current ID in localStorage, subscribes to `/events` with `EventSource`, reloads status/transcript/summary, displays processing stages, and provides transcript timestamp buttons, summary audio, typed questions, and browser microphone recording. Local uploads preview directly from a browser object URL, while completed YouTube videos load from the backend route `/videos/{video_id}/media` so playback and timestamp jumping work after processing completes without exposing arbitrary filesystem paths.
 
-The most important backend files are `backend/app/api/videos.py` for the video HTTP boundary, `backend/app/api/auth.py` and `backend/app/services/auth.py` for authentication, `backend/app/services/user_storage.py` for user persistence, `backend/app/services/video_processing.py` for orchestration and process-local jobs, `media.py` for FFmpeg/yt-dlp, `asr.py` for Whisper, `rag.py` for Chroma, `llm.py` for Groq/summaries/Q&A, `voice.py` for spoken questions, and `tts.py` for audio. There is no relational database, durable queue, multi-user ownership, or production deployment layer. Sessions and job state disappear on restart even when artifacts remain. Before changing the project, preserve video IDs/timestamp metadata, remember that all result routes require an in-memory completed job, keep Q&A video-scoped, and check the frontend/backend processing-status type drift. Treat the local Groq credential as compromised and rotate it before normal use.
+The most important backend files are `backend/app/api/videos.py` for the video HTTP boundary, `backend/app/api/chats.py` and `backend/app/services/chat_storage.py` for persistent user-owned chats, `backend/app/api/auth.py` and `backend/app/services/auth.py` for authentication, `backend/app/services/user_storage.py` for user persistence, `backend/app/services/video_processing.py` for orchestration and process-local jobs, `media.py` for FFmpeg/yt-dlp, `asr.py` for Whisper, `rag.py` for Chroma, `llm.py` for Groq/summaries/Q&A, `voice.py` for spoken questions, and `tts.py` for audio. There is no relational database, durable queue, video ownership model, or production deployment layer. Chat files survive backend restarts; sessions and job state do not. Before changing the project, preserve video IDs/timestamp metadata, remember that all result routes require an in-memory completed job, keep Q&A video-scoped, and check the frontend/backend processing-status type drift. Treat the local Groq credential as compromised and rotate it before normal use.
 
 ## 23. Completed Phase: Authentication Foundation
 
@@ -1003,3 +1019,29 @@ The new dependency is `pwdlib[argon2]`. No database was added. Existing video ro
 ### Validation
 
 `python -m pytest tests/test_auth.py -q` passed all 9 auth tests after installing the dependency into the project virtual environment. A live Uvicorn HTTP smoke test also passed health, registration, login, `/auth/me`, and logout using a temporary user store.
+
+## 24. Completed Phase: Persistent User-Owned Chats
+
+### Storage architecture
+
+Chats are stored as independent JSON files at `data/chats/{username}/{chat_id}.json`. `ChatStore` creates directories automatically, validates usernames and 32-character lowercase hexadecimal chat IDs, rejects symlinked storage/user/chat paths, and uses a flushed/fsynced temporary file plus `os.replace()` for safe updates. Each record includes chat ID, authenticated username, title, timestamps, optional video ID/metadata, optional summary/transcript, and the complete message list. Assistant messages can retain transcript evidence sources, timestamps, and an answer-audio reference.
+
+For normal video-linked chats, the record keeps the video ID and leaves large transcript/summary payloads un-copied; detail reads restore them from the existing canonical transcript and summary JSON artifacts when available. These files do not duplicate video processing data by default.
+
+### API and ownership
+
+- `GET /chats`: list the current user's chats.
+- `POST /chats`: create a chat with a server-generated chat ID.
+- `GET /chats/{chat_id}`: retrieve a chat and available video context.
+- `PUT /chats/{chat_id}`: update metadata/content for an owned chat.
+- `DELETE /chats/{chat_id}`: delete an owned chat.
+
+All routes use `get_current_user()` from `backend/app/api/dependencies.py`. The username comes only from the authenticated session; request bodies cannot select an owner. Store lookups are always rooted in that username's directory, so foreign and missing chat IDs have the same `404` response. Invalid IDs receive `422`, and malformed stored JSON fails closed with `503` without exposing filesystem paths. This ownership applies to chats only; video endpoints remain public and unowned.
+
+### Persistent history versus LLM context
+
+The complete history is persisted for session restoration, but it is not automatically sent to Groq. `VideoAIService` retains its existing process-local, per-video context limit of three prior messages; RAG remains video-scoped and its transcript evidence/fallback bounds are unchanged.
+
+### Tests and validation
+
+`tests/test_chats.py` covers create/read/update/delete/list, store reload persistence, video artifact restoration without transcript duplication, user A's read/update/delete denial against user B's chat, client-supplied username rejection, malformed JSON, and invalid/path-traversal IDs. Existing auth, LLM, RAG, video-processing, health, voice, and Vanish tests remain part of the backend regression suite.
