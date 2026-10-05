@@ -184,6 +184,13 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 `frontend/src/api.ts` attaches browser credentials to API requests. The browser stores and sends the backend's HTTP-only cookie; no password or session token is stored in frontend localStorage. Refreshing the page restores the session through `/auth/me`. Logout calls `POST /auth/logout`; a `401` from a protected API request clears the frontend user and returns to login with an expiry message. The existing video workspace component only mounts after session restoration succeeds. This is frontend gating: video API routes themselves remain public and videos are not user-owned.
 
+### Frontend Theme System
+
+- **Architecture:** `frontend/src/styles.css` defines semantic CSS custom properties at the document root and overrides their values for `html[data-theme="solarized-light"]`. Shared component rules consume these tokens so authentication and workspace elements use one UI implementation.
+- **Available themes:** Dark Modern is the default; Solarized Light uses the Solarized light palette.
+- **Persistence:** `frontend/src/App.tsx` restores the `videomind.theme` value from browser `localStorage`, applies it to the document root, and saves changes. Invalid or unavailable saved values fall back to Dark Modern.
+- **Important CSS/token files:** `frontend/src/App.tsx` owns theme state and the visible toggle; `frontend/src/styles.css` owns the design tokens and theme-aware component styles; `frontend/src/main.tsx` imports the shared stylesheet.
+
 ### `backend/app/api/videos.py`
 
 **Purpose:** HTTP boundary for all video workflows.

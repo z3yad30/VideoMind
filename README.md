@@ -153,6 +153,10 @@ The Vite development server runs at `http://localhost:5173` and proxies `/api` r
 
 The Python virtual environment installs backend dependencies from `requirements.txt`. Frontend dependencies cannot be installed into that environment because React and Vite are Node/npm packages. Install them once with `npm install` inside `frontend`; validate the production bundle with `npm run build`.
 
+### Frontend Themes
+
+The frontend supports two themes: **Dark Modern** (the default) and **Solarized Light**. Use the theme button in the login header or workspace header to switch themes. The selected theme is stored in browser `localStorage` under `videomind.theme` and is restored on refresh. Both themes use the same application UI and shared CSS design tokens; changing themes does not alter video, transcript, summary, Q&A, processing, or authentication behavior.
+
 ## Runtime Data Reset: Vanish
 
 Use the standalone cleanup utility to remove only VideoMind’s generated runtime data while leaving the repository and source code intact.

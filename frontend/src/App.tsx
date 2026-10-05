@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -32,6 +32,17 @@ import {
 
 type Notice = { kind: "error" | "info"; message: string } | null;
 type SourceProps = { source: QuestionSource; onJump: (seconds: number) => void; canJump: boolean };
+type Theme = "dark-modern" | "solarized-light";
+
+const themeStorageKey = "videomind.theme";
+
+function readTheme(): Theme {
+  try {
+    return window.localStorage.getItem(themeStorageKey) === "solarized-light" ? "solarized-light" : "dark-modern";
+  } catch {
+    return "dark-modern";
+  }
+}
 
 const statusLabels: Record<ProcessingStatus, string> = {
   queued: "Queued",
@@ -81,9 +92,19 @@ function SourceList({ source, onJump, canJump }: SourceProps) {
 }
 
 export default function App() {
+  const [theme, setTheme] = useState<Theme>(readTheme);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [authMessage, setAuthMessage] = useState("");
+
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem(themeStorageKey, theme);
+    } catch {
+      // Keep the selected theme for this session when storage is unavailable.
+    }
+  }, [theme]);
 
   useEffect(() => {
     setSessionExpiredHandler(() => {
@@ -126,11 +147,17 @@ export default function App() {
   if (isCheckingSession) {
     return <main className="auth-shell"><div className="auth-loading" role="status">Checking your session...</div></main>;
   }
-  if (!user) return <AuthPage onAuthenticated={signIn} message={authMessage} />;
-  return <VideoWorkspace username={user.username} onLogout={() => void signOut()} />;
+  if (!user) return <AuthPage onAuthenticated={signIn} message={authMessage} theme={theme} onThemeToggle={() => setTheme((current) => current === "dark-modern" ? "solarized-light" : "dark-modern")} />;
+  return <VideoWorkspace username={user.username} onLogout={() => void signOut()} theme={theme} onThemeToggle={() => setTheme((current) => current === "dark-modern" ? "solarized-light" : "dark-modern")} />;
 }
 
-function AuthPage({ onAuthenticated, message }: { onAuthenticated: (user: AuthUser) => void; message: string }) {
+function ThemeToggle({ theme, onToggle }: { theme: Theme; onToggle: () => void }) {
+  const currentTheme = theme === "dark-modern" ? "Dark Modern" : "Solarized Light";
+  const nextTheme = theme === "dark-modern" ? "Solarized Light" : "Dark Modern";
+  return <button className="theme-toggle" type="button" onClick={onToggle} aria-label={`Current theme: ${currentTheme}. Switch to ${nextTheme}.`} title={`Switch to ${nextTheme}`}><span aria-hidden="true">◐</span>{currentTheme}</button>;
+}
+
+function AuthPage({ onAuthenticated, message, theme, onThemeToggle }: { onAuthenticated: (user: AuthUser) => void; message: string; theme: Theme; onThemeToggle: () => void }) {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -183,7 +210,7 @@ function AuthPage({ onAuthenticated, message }: { onAuthenticated: (user: AuthUs
   };
 
   return <main className="auth-shell">
-    <header className="auth-brand"><div className="brand"><span className="brand-mark">V</span><span>VideoMind</span></div><span className="auth-brand-note">Your video, made searchable</span></header>
+    <header className="auth-brand"><div className="brand"><span className="brand-mark">V</span><span>VideoMind</span></div><ThemeToggle theme={theme} onToggle={onThemeToggle} /><span className="auth-brand-note">Your video, made searchable</span></header>
     <section className="auth-panel" aria-labelledby="auth-title">
       <p className="eyebrow">{mode === "login" ? "Welcome back" : "A clearer way to watch"}</p>
       <h1 id="auth-title">{mode === "login" ? <>Pick up<br /><em>where you left off.</em></> : <>Make room for<br /><em>better questions.</em></>}</h1>
@@ -206,7 +233,7 @@ function AuthPage({ onAuthenticated, message }: { onAuthenticated: (user: AuthUs
   </main>;
 }
 
-function VideoWorkspace({ username, onLogout }: { username: string; onLogout: () => void }) {
+function VideoWorkspace({ username, onLogout, theme, onThemeToggle }: { username: string; onLogout: () => void; theme: Theme; onThemeToggle: () => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [sourceUrl, setSourceUrl] = useState("");
   const [videoId, setVideoId] = useState<string | null>(null);
@@ -408,7 +435,7 @@ function VideoWorkspace({ username, onLogout }: { username: string; onLogout: ()
     <main className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark">V</span><span>VideoMind</span></div>
-        <div className="workspace-account"><span>{username}</span><button className="new-button" type="button" onClick={resetWorkspace}>New video <span>+</span></button><button className="new-button" type="button" onClick={onLogout}>Log out</button></div>
+        <div className="workspace-account"><span>{username}</span><ThemeToggle theme={theme} onToggle={onThemeToggle} /><button className="new-button" type="button" onClick={resetWorkspace}>New video <span>+</span></button><button className="new-button" type="button" onClick={onLogout}>Log out</button></div>
       </header>
 
       {!videoId && <section className="hero">
