@@ -137,6 +137,8 @@ Chat API (all endpoints require the HTTP-only authenticated session cookie):
 
 The assistant reply is saved with its text, source excerpts and start/end times, a timestamp list, creation time, and an answer-audio reference when TTS succeeds. Answer audio uses the existing `VoiceQuestionService` TTS adapter and `GET /videos/{video_id}/answers/{answer_id}/audio` route. If TTS is unavailable, the text answer is still returned and persisted without an audio reference. The response includes both saved messages and the source list.
 
+In the chat, each assistant reply's **Relevant transcript / Sources** section starts collapsed to keep the conversation compact. Its keyboard-accessible expand button reveals transcript excerpts and start/end timestamps; each timestamp seeks playback to that point. Expand/collapse state is independent for every reply. This changes only source presentation, not retrieval or answer generation.
+
 Persistent chat history is the complete ordered conversation and survives backend reloads. It is separate from LLM context: each chat question sends at most the latest three prior user/assistant messages to Groq, never the full history. Retrieved evidence remains the authority for factual answers. Chat files are user data and are not removed by the Vanish runtime cleanup utility.
 
 ## Running the Frontend

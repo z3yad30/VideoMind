@@ -292,12 +292,23 @@ html[data-theme="solarized-light"] .toast.error { color: #fff; }
 .message-markdown a { color: var(--accent); }
 .message-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .message-markdown th, .message-markdown td { padding: 6px 8px; border: 1px solid var(--border-strong); text-align: left; }
-.message-sources { display: grid; gap: 5px; margin-top: 15px; }
-.message-sources > span { color: var(--subtle); font: 9px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .08em; }
-.message-sources button { display: grid; grid-template-columns: 45px 1fr; gap: 9px; padding: 8px 9px; border: 1px solid var(--border); color: var(--muted); background: var(--surface); text-align: left; font-size: 10px; line-height: 1.5; }
-.message-sources button:hover:not(:disabled) { border-color: var(--accent); }
-.message-sources time { color: var(--accent); font: 10px 'DM Mono', monospace; }
-.message-sources button:disabled { opacity: .55; }
+.message-sources { margin-top: 10px; }
+.message-sources-toggle { display: inline-flex; min-height: 28px; align-items: center; gap: 7px; padding: 3px 0; border: 0; color: var(--muted); background: transparent; text-align: left; font: 9px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .08em; }
+.message-sources-toggle:hover { color: var(--text); }
+.message-sources-toggle:focus-visible, .message-source-times button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.source-chevron { display: inline-block; color: var(--accent); font: 18px/1 'Manrope', sans-serif; transform: rotate(0); transition: transform .16s ease; }
+.source-chevron.expanded { transform: rotate(90deg); }
+.source-count { color: var(--subtle); }
+.message-source-list { display: grid; gap: 6px; margin-top: 5px; animation: source-reveal .16s ease both; }
+.message-source-list[hidden] { display: none; }
+.message-source-item { padding: 8px 9px; border: 1px solid var(--border); color: var(--muted); background: var(--surface); font-size: 10px; line-height: 1.5; }
+.message-source-item p { margin: 6px 0 0; color: var(--text); }
+.message-source-times { display: flex; gap: 12px; }
+.message-source-times button { display: inline-flex; gap: 5px; align-items: baseline; padding: 0; border: 0; color: var(--subtle); background: transparent; font-size: 9px; }
+.message-source-times button:hover:not(:disabled) time { text-decoration: underline; }
+.message-source-times time { color: var(--accent); font: 10px 'DM Mono', monospace; }
+.message-source-times button:disabled { opacity: .55; }
+@keyframes source-reveal { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: translateY(0); } }
 .chat-state, .assistant-pending { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; }
 .chat-state { justify-content: center; flex: 1; }
 .assistant-pending { padding-left: 42px; animation: chat-appear .2s ease both; }

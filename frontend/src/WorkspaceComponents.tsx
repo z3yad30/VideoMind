@@ -1,4 +1,4 @@
-import { useEffect, useRef, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatListItem, ChatMessage, ProcessingEvent, ProcessingStage, Summary, TranscriptSegment } from "./api";
@@ -92,9 +92,11 @@ export function ChatWindow({ chatTitle, messages, hasVideo, videoReady, isLoadin
 }
 
 function ChatMessage({ message, onJump, canJump }: { message: ChatMessage; onJump: (seconds: number) => void; canJump: boolean }) {
+  const [sourcesExpanded, setSourcesExpanded] = useState(false);
+  const sourcesId = useId();
   const isUser = message.role === "user";
   if (message.role === "system") return null;
-  return <article className={`chat-message ${isUser ? "from-user" : "from-assistant"}`}><div className="message-avatar" aria-hidden="true">{isUser ? "Y" : "V"}</div><div className="message-content"><div className="message-meta"><strong>{isUser ? "You" : "VideoMind"}</strong><time dateTime={message.timestamp}>{new Date(message.timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></div>{isUser ? <p className="message-user-text">{message.content}</p> : <div className="message-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>}{!isUser && message.sources.length > 0 && <div className="message-sources"><span>Video references</span>{message.sources.map((source, index) => <button type="button" key={`${source.start}-${index}`} onClick={() => onJump(source.start)} disabled={!canJump}><time>{formatTime(source.start)}</time><span>{source.text}</span></button>)}</div>}</div></article>;
+  return <article className={`chat-message ${isUser ? "from-user" : "from-assistant"}`}><div className="message-avatar" aria-hidden="true">{isUser ? "Y" : "V"}</div><div className="message-content"><div className="message-meta"><strong>{isUser ? "You" : "VideoMind"}</strong><time dateTime={message.timestamp}>{new Date(message.timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></div>{isUser ? <p className="message-user-text">{message.content}</p> : <div className="message-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>}{!isUser && message.sources.length > 0 && <div className="message-sources"><button className="message-sources-toggle" type="button" aria-expanded={sourcesExpanded} aria-controls={sourcesId} onClick={() => setSourcesExpanded((expanded) => !expanded)}><span className={`source-chevron ${sourcesExpanded ? "expanded" : ""}`} aria-hidden="true">›</span><span>Relevant transcript / Sources</span><span className="source-count">{message.sources.length}</span></button><div className="message-source-list" id={sourcesId} hidden={!sourcesExpanded}>{message.sources.map((source, index) => <div className="message-source-item" key={`${source.start}-${index}`}><div className="message-source-times"><button type="button" onClick={() => onJump(source.start)} disabled={!canJump} aria-label={`Seek to ${formatTime(source.start)}`}><span>Start</span><time>{formatTime(source.start)}</time></button><button type="button" onClick={() => onJump(source.end)} disabled={!canJump} aria-label={`Seek to ${formatTime(source.end)}`}><span>End</span><time>{formatTime(source.end)}</time></button></div><p>{source.text}</p></div>)}</div></div>}</div></article>;
 }
 
 export function NewVideoPanel({ fileName, sourceUrl, isSubmitting, onFile, onUrlChange, onStart }: {
