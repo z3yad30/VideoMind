@@ -110,7 +110,7 @@ The backend provides username/password registration, login, session inspection, 
 
 Users are stored in `data/users/users.json`. Passwords are hashed with Argon2 through `pwdlib`; plaintext passwords and password hashes are not returned by the API. User-file updates use an atomic temporary-file replacement, and missing user storage is initialized automatically. Authentication does not use a database or frontend localStorage.
 
-The frontend opens on a login screen and offers account registration. Registration validates the username and password confirmation, creates the account through `POST /auth/register`, then signs in through `POST /auth/login`. Existing users can sign in directly. Passwords are sent only to the backend over the configured API connection; the frontend does not save passwords in localStorage.
+The frontend opens on a login screen and offers account registration. Registration validates the username and password confirmation, creates the account through `POST /auth/register`, then signs in through `POST /auth/login`. Existing users can sign in directly. Passwords are sent only to the backend over the configured API connection; the frontend does not save passwords in localStorage. After sign-in, the chatbot workspace loads the authenticated user's saved chats from the backend.
 
 On startup, the frontend calls `GET /auth/me` and only mounts the VideoMind workspace when a valid session is returned. Login sets an HTTP-only, SameSite=Lax session cookie that the browser attaches to subsequent API requests, including after a page refresh. Sessions are random server-side identifiers and expire after 12 hours. Session state is in memory, so restarting the backend invalidates all sessions. A protected API `401` returns the frontend to login, and logout calls `POST /auth/logout` to invalidate the session and clear the cookie.
 
@@ -155,7 +155,17 @@ The Python virtual environment installs backend dependencies from `requirements.
 
 ### Frontend Themes
 
-The frontend supports two themes: **Dark Modern** (the default) and **Solarized Light**. Use the theme button in the login header or workspace header to switch themes. The selected theme is stored in browser `localStorage` under `videomind.theme` and is restored on refresh. Both themes use the same application UI and shared CSS design tokens; changing themes does not alter video, transcript, summary, Q&A, processing, or authentication behavior.
+The frontend supports two themes: **Dark Modern** (the default) and **Solarized Light**. Use the theme button in the login header or workspace sidebar to switch themes. The selected theme is stored in browser `localStorage` under `videomind.theme` and is restored on refresh. Both themes use the same application UI and shared CSS design tokens; changing themes does not alter video, transcript, summary, Q&A, processing, or authentication behavior.
+
+### Chat Workspace
+
+The authenticated frontend is a chatbot-style workspace. On desktop, a persistent sidebar sits beside a full-height conversation; on smaller screens, the sidebar opens as a drawer. The sidebar contains **New video**, **New chat**, the current video's **Summary**, **Video**, and **Transcript** views, the authenticated user's saved chat list (title and last-updated date), and account/theme controls including **Log out**.
+
+Selecting a saved chat loads its full chronological message history and video ID through `GET /chats/{chat_id}`. The chat's summary and transcript are restored from that response, while processing status and canonical artifacts are refreshed through the existing video endpoints. Messages are rendered distinctly by role; the question composer stays at the bottom and disables submission while a reply is being generated. Chat history remains backend-owned JSON data and is not mirrored into browser localStorage.
+
+**New video** opens the existing upload or YouTube ingestion workflow. When processing completes, the frontend creates and opens a chat associated with the resulting video ID. **New chat** creates an empty chat linked to the currently selected, already-processed video; it does not upload or download that video again. The Summary, Video, and Transcript sidebar views use the context restored for the selected chat.
+
+Frontend responsibilities are split across `frontend/src/App.tsx` for authentication, `frontend/src/VideoChatWorkspace.tsx` for workspace state and API orchestration, `frontend/src/WorkspaceComponents.tsx` for the sidebar, chat messages/composer, ingestion and context panels, `frontend/src/api.ts` for typed HTTP calls, and `frontend/src/styles.css` for responsive layout and themes.
 
 ## Runtime Data Reset: Vanish
 

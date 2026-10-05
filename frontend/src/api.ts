@@ -64,6 +64,35 @@ export type ProcessingEvent = {
 };
 export type Summary = { [key: string]: string };
 export type Answer = { answer: string; sources: QuestionSource[] };
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  timestamp: string;
+  sources: QuestionSource[];
+  timestamps: number[];
+  answer_audio_ref: string | null;
+};
+export type ChatListItem = {
+  chat_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  video_id: string | null;
+};
+export type ChatRecord = ChatListItem & {
+  username: string;
+  video_metadata: Record<string, unknown> | null;
+  summary: Summary | null;
+  transcript: { video_id?: string; segments: TranscriptSegment[] } | null;
+  messages: ChatMessage[];
+};
+export type ChatQuestionResponse = {
+  user_message: ChatMessage;
+  assistant_message: ChatMessage;
+  sources: QuestionSource[];
+  answer_audio_location: string | null;
+};
 export type VoiceAnswer = Answer & {
   transcribed_question: string;
   audio_answer_location: string;
@@ -148,6 +177,30 @@ export function getTranscript(videoId: string) {
 
 export function getSummary(videoId: string) {
   return request<{ video_id: string; summary: Summary }>(`/videos/${videoId}/summary`);
+}
+
+export function listChats() {
+  return request<ChatListItem[]>("/chats");
+}
+
+export function createChat(videoId?: string) {
+  return request<ChatRecord>("/chats", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(videoId ? { video_id: videoId } : {}),
+  });
+}
+
+export function getChat(chatId: string) {
+  return request<ChatRecord>(`/chats/${chatId}`);
+}
+
+export function askChatQuestion(chatId: string, question: string) {
+  return request<ChatQuestionResponse>(`/chats/${chatId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
 }
 
 export function askQuestion(videoId: string, question: string) {

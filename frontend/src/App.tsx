@@ -29,6 +29,7 @@ import {
   type VoiceAnswer,
   uploadVideo,
 } from "./api";
+import VideoChatWorkspace from "./VideoChatWorkspace";
 
 type Notice = { kind: "error" | "info"; message: string } | null;
 type SourceProps = { source: QuestionSource; onJump: (seconds: number) => void; canJump: boolean };
@@ -148,7 +149,7 @@ export default function App() {
     return <main className="auth-shell"><div className="auth-loading" role="status">Checking your session...</div></main>;
   }
   if (!user) return <AuthPage onAuthenticated={signIn} message={authMessage} theme={theme} onThemeToggle={() => setTheme((current) => current === "dark-modern" ? "solarized-light" : "dark-modern")} />;
-  return <VideoWorkspace username={user.username} onLogout={() => void signOut()} theme={theme} onThemeToggle={() => setTheme((current) => current === "dark-modern" ? "solarized-light" : "dark-modern")} />;
+  return <VideoChatWorkspace username={user.username} onLogout={() => void signOut()} theme={theme} onThemeToggle={() => setTheme((current) => current === "dark-modern" ? "solarized-light" : "dark-modern")} />;
 }
 
 function ThemeToggle({ theme, onToggle }: { theme: Theme; onToggle: () => void }) {

@@ -14,7 +14,7 @@ The implemented goal is to let a user bring one media source, wait for backgroun
 
 The repository also includes a standalone runtime reset helper, `scripts/vanish.py`, which removes generated processing artifacts from the local `data/` tree without deleting the project itself or other caches. The backend implements local username/password accounts, cookie sessions, and persistent per-user chat ownership. Video routes remain public and are not account-owned. There is no relational database. It remains a local MVP, not an internet-facing multi-user deployment.
 
-The frontend implements a cookie-backed login/register experience and gates the video workspace on the current session. Its `AnswerCard` renders LLM answers with `react-markdown` and `remark-gfm`, preserving the backend Markdown while supporting headings, lists, tables, task lists, code blocks, links, and other GitHub-Flavored Markdown formatting.
+The frontend implements a cookie-backed login/register experience and gates a chatbot-style workspace on the current session. The workspace displays complete chronological chat history, distinct user and assistant messages, and a bottom-anchored composer. Saved chat records remain backend-authoritative; selecting a chat restores its video ID, summary, transcript, and messages. New video preserves the existing ingestion pipeline and creates a chat when processing finishes, while New chat links another conversation to the already-processed video without re-ingestion.
 
 ### Core capabilities
 
@@ -38,8 +38,10 @@ The frontend implements a cookie-backed login/register experience and gates the 
 | Summaries and Q&A | `backend/app/services/llm.py:VideoAIService` | Coordinates RAG, Groq structured summaries, and grounded answers. |
 | Text-to-speech | `backend/app/services/tts.py:Pyttsx3TTSService` | Creates WAV output through local Windows SAPI/`pyttsx3`. |
 | Voice questions | `backend/app/services/voice.py:VoiceQuestionService` | Transcribes a microphone file, asks the same RAG/LLM question path, and synthesizes the answer. |
-| Browser UI and auth gate | `frontend/src/App.tsx:App()` | Restores the session, renders login/register when signed out, and mounts the existing video workspace when signed in. |
-| Frontend API client | `frontend/src/api.ts` | Sends cookie-backed auth and video requests, formats API errors, and signals expired protected sessions. |
+| Browser UI and auth gate | `frontend/src/App.tsx:App()` | Restores the session, renders login/register when signed out, and mounts the chat workspace when signed in. |
+| Chat workspace state | `frontend/src/VideoChatWorkspace.tsx` | Loads saved chats, restores selected-video context, creates sibling chats, handles ingestion events, and submits persistent chat questions. |
+| Workspace components | `frontend/src/WorkspaceComponents.tsx` | Renders the responsive sidebar, chat history/messages/composer, ingestion, processing, summary, video, and transcript views. |
+| Frontend API client | `frontend/src/api.ts` | Sends cookie-backed auth, chat, and video requests, formats API errors, and signals expired protected sessions. |
 
 ## 2. High-Level Architecture
 
@@ -121,9 +123,11 @@ flowchart TD
 | `frontend/package.json` | Frontend config | npm dependencies/scripts. | `dev`, `build`, and `preview` scripts. |
 | `frontend/vite.config.ts` | Frontend config | Vite/plugin/proxy configuration. | Port 5173 and `/api` proxy to port 8000. |
 | `frontend/src/main.tsx` | Frontend entrypoint | Mounts React app under `#root`. | Wraps `App` in `StrictMode`. |
-| `frontend/src/App.tsx` | Main component | Auth gate, login/register UI, and video workflow composition. | Restores the session, validates auth form input, calls auth methods, handles logout/expiry, and preserves video state/SSE/media/transcript/summary/Q&A/recording workflows. |
-| `frontend/src/api.ts` | API client | Typed cookie-backed fetch wrappers. | Centralizes auth and video REST calls, HTTP error handling, expired-session notification, event/media URLs, and time formatting. |
-| `frontend/src/styles.css` | Styling | Full frontend visual system/layout. | Responsive auth screens and existing ingestion, processing, transcript, summary, Q&A, and notice UI. |
+| `frontend/src/App.tsx` | Main component | Auth gate and login/register UI. | Restores the session, validates auth form input, calls auth methods, handles logout/expiry, and mounts the chat workspace after authentication. |
+| `frontend/src/VideoChatWorkspace.tsx` | Workspace controller | Chat, video, and ingestion client state. | Loads backend chat lists/details, restores video artifacts, creates chats, subscribes to processing events, and persists submitted questions through chat endpoints. |
+| `frontend/src/WorkspaceComponents.tsx` | Workspace UI | Sidebar, conversation, composer, and context panels. | Provides `ChatSidebar`, `ChatWindow`, `ChatMessage`, `NewVideoPanel`, `ProcessingPanel`, `SummaryPanel`, `VideoPanel`, and `TranscriptPanel`. |
+| `frontend/src/api.ts` | API client | Typed cookie-backed fetch wrappers. | Centralizes auth, chat, and video REST calls, HTTP error handling, expired-session notification, event/media URLs, and time formatting. |
+| `frontend/src/styles.css` | Styling | Full frontend visual system/layout. | Defines responsive auth and chatbot layouts, the collapsible mobile sidebar, message presentation, composer, ingestion, processing, summary, video, and transcript views. |
 | `frontend/src/vite-env.d.ts` | Type declarations | Vite environment typing. | Boilerplate declaration file. |
 | `tests/test_health.py` | Tests | Health route test. | Confirms `GET /health`. |
 | `tests/test_auth.py` | Tests | Authentication integration tests. | Registration, duplicate usernames, password hashing, login, session, logout, malformed input, and corrupt storage. |
@@ -180,9 +184,17 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 ### Frontend Authentication Flow
 
-`App()` calls `GET /auth/me` on startup while showing a session-check state. A valid response mounts `VideoWorkspace`; a missing or expired session shows `AuthPage` in login mode. The page switches between login and registration, checks username syntax and password confirmation, and reports duplicate usernames, invalid credentials/input, and backend connection failures. Successful registration is followed by `POST /auth/login` because registration does not issue a session cookie.
+`App()` calls `GET /auth/me` on startup while showing a session-check state. A valid response mounts `VideoChatWorkspace`; a missing or expired session shows `AuthPage` in login mode. The page switches between login and registration, checks username syntax and password confirmation, and reports duplicate usernames, invalid credentials/input, and backend connection failures. Successful registration is followed by `POST /auth/login` because registration does not issue a session cookie.
 
-`frontend/src/api.ts` attaches browser credentials to API requests. The browser stores and sends the backend's HTTP-only cookie; no password or session token is stored in frontend localStorage. Refreshing the page restores the session through `/auth/me`. Logout calls `POST /auth/logout`; a `401` from a protected API request clears the frontend user and returns to login with an expiry message. The existing video workspace component only mounts after session restoration succeeds. This is frontend gating: video API routes themselves remain public and videos are not user-owned.
+`frontend/src/api.ts` attaches browser credentials to API requests. The browser stores and sends the backend's HTTP-only cookie; no password or session token is stored in frontend localStorage. Refreshing the page restores the session through `/auth/me`. Logout calls `POST /auth/logout`; a `401` from a protected API request clears the frontend user and returns to login with an expiry message. The chat workspace only mounts after session restoration succeeds. This is frontend gating: video API routes themselves remain public and videos are not user-owned.
+
+### Frontend Chat Workspace
+
+- **Layout:** `ChatSidebar` provides New video, New chat, current-video Summary/Video/Transcript navigation, saved chats with title and updated date, theme control, and logout. `ChatWindow` fills the remaining viewport with the full chronological conversation and a composer anchored at the bottom. On narrow screens, the sidebar becomes a dismissible drawer.
+- **Chat loading:** `VideoChatWorkspace` calls `GET /chats` for the signed-in user and opens the newest chat. Selecting a saved item calls `GET /chats/{chat_id}` and restores its complete message list, video ID, summary, and transcript. Video status and available canonical artifacts use the existing video endpoints. Chat history is never treated as localStorage state.
+- **Question flow:** The composer submits through `POST /chats/{chat_id}/messages`, blocks duplicate sends while pending, and appends the server-returned persisted user and assistant messages in timestamp order. Markdown answers and their timestamped video references remain readable in the conversation.
+- **New video versus new chat:** New video opens the existing file/YouTube ingestion flow; once processing reports completion, the frontend creates a chat attached to that video. New chat calls `POST /chats` with the current video ID and does not call upload or YouTube processing.
+- **Component structure:** `App.tsx` owns auth and session gating; `VideoChatWorkspace.tsx` owns API and workflow state; `WorkspaceComponents.tsx` contains the sidebar, chat, ingestion, processing, and video-context panels; `api.ts` defines typed backend calls; `styles.css` implements themes and responsive layout.
 
 ### Frontend Theme System
 
@@ -301,21 +313,35 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 **Purpose:** Typed browser API adapter.
 
-**Important symbols:** `request()`, `uploadVideo()`, `processYouTube()`, `getStatus()`, `eventsUrl()`, `getTranscript()`, `getSummary()`, `askQuestion()`, `askVoiceQuestion()`, `resolveMediaUrl()`, `formatTime()`.
+**Important symbols:** `request()`, `listChats()`, `createChat()`, `getChat()`, `askChatQuestion()`, `uploadVideo()`, `processYouTube()`, `getStatus()`, `eventsUrl()`, `getTranscript()`, `getSummary()`, `resolveMediaUrl()`, `formatTime()`.
 
 **Inputs/outputs:** Converts frontend state to multipart/JSON HTTP calls and parses JSON responses. Uses `VITE_API_BASE_URL || "/api"`.
 
 ### `frontend/src/App.tsx`
 
-**Purpose:** Main UI and client-side workflow state.
+**Purpose:** Authentication gate and login/register UI.
 
-**Important symbols:** `App()`, `SourceList`, `ProcessingActivity`, `SummaryAudio`, `AnswerCard`, `startProcessing()`, `ask()`, `toggleRecording()`, `jumpTo()`, `resetWorkspace()`, `chooseFile()`.
+**Important symbols:** `App()`, `AuthPage`, `ThemeToggle`.
 
-**Responsibilities:** File/URL selection, local preview, localStorage recovery, EventSource subscription, status refresh, transcript/summary fetch, text Q&A, MediaRecorder voice Q&A, audio playback, timestamp jumps, reset flow, and notices.
+**Responsibilities:** Restore the cookie-backed session, validate login and registration, handle logout/session expiry, and mount `VideoChatWorkspace` for authenticated users.
+
+### `frontend/src/VideoChatWorkspace.tsx`
+
+**Purpose:** Own chat selection, video context, ingestion, and persistent question workflow state.
+
+**Responsibilities:** Load the authenticated user's saved chats, open the newest chat, restore full messages and chat-linked summary/transcript, monitor active video processing, create a chat after ingestion, create additional chats for the current video without reprocessing, and submit questions through the persistent chat API.
+
+### `frontend/src/WorkspaceComponents.tsx`
+
+**Purpose:** Present the chatbot workspace as focused UI components.
+
+**Important components:** `ChatSidebar`, `ChatWindow`, `ChatMessage`, `NewVideoPanel`, `ProcessingPanel`, `SummaryPanel`, `VideoPanel`, and `TranscriptPanel`.
+
+**Responsibilities:** Render saved-chat navigation and logout, the chronological conversation and bottom composer, responsive drawer behavior, video ingestion/progress, and restored video context views.
 
 ### `frontend/src/styles.css`
 
-**Purpose:** Defines the responsive visual interface. It contains the app shell, ingestion panel, processing stages, media/transcript/summary/Q&A layout, source controls, toast states, animations, and mobile breakpoints.
+**Purpose:** Defines the responsive visual interface. It contains authentication styling, the desktop sidebar/chat layout, mobile navigation drawer, conversation messages and composer, ingestion/processing/context views, toast states, animations, and breakpoints.
 
 ## 5. Retrieval and Raw Transcript Fallback Behavior
 
