@@ -14,7 +14,7 @@ The implemented goal is to let a user bring one media source, wait for backgroun
 
 The repository also includes a standalone runtime reset helper, `scripts/vanish.py`, which removes generated processing artifacts from the local `data/` tree without deleting the project itself or other caches. The backend implements local username/password accounts, cookie sessions, and persistent per-user chat ownership. Video routes remain public and are not account-owned. There is no relational database. It remains a local MVP, not an internet-facing multi-user deployment.
 
-The frontend `AnswerCard` renders LLM answers with `react-markdown` and `remark-gfm`, preserving the backend Markdown while supporting headings, lists, tables, task lists, code blocks, links, and other GitHub-Flavored Markdown formatting.
+The frontend implements a cookie-backed login/register experience and gates the video workspace on the current session. Its `AnswerCard` renders LLM answers with `react-markdown` and `remark-gfm`, preserving the backend Markdown while supporting headings, lists, tables, task lists, code blocks, links, and other GitHub-Flavored Markdown formatting.
 
 ### Core capabilities
 
@@ -38,7 +38,8 @@ The frontend `AnswerCard` renders LLM answers with `react-markdown` and `remark-
 | Summaries and Q&A | `backend/app/services/llm.py:VideoAIService` | Coordinates RAG, Groq structured summaries, and grounded answers. |
 | Text-to-speech | `backend/app/services/tts.py:Pyttsx3TTSService` | Creates WAV output through local Windows SAPI/`pyttsx3`. |
 | Voice questions | `backend/app/services/voice.py:VoiceQuestionService` | Transcribes a microphone file, asks the same RAG/LLM question path, and synthesizes the answer. |
-| Browser UI | `frontend/src/App.tsx:App()` | Handles ingestion, SSE activity, transcript/summary display, typed questions, recording, and playback. |
+| Browser UI and auth gate | `frontend/src/App.tsx:App()` | Restores the session, renders login/register when signed out, and mounts the existing video workspace when signed in. |
+| Frontend API client | `frontend/src/api.ts` | Sends cookie-backed auth and video requests, formats API errors, and signals expired protected sessions. |
 
 ## 2. High-Level Architecture
 
@@ -82,7 +83,7 @@ flowchart TD
 - **AI:** Local `faster-whisper` ASR, local Sentence Transformers embeddings, Groq LLM, and local Windows SAPI TTS.
 - **Background processing:** `asyncio.create_task(asyncio.to_thread(video_service.process, ...))` in `backend/app/api/videos.py`.
 - **Queues/workers:** Not found in codebase.
-- **Authentication:** Username/password auth exists; users are JSON-backed, passwords are Argon2-hashed, and opaque session IDs are stored in memory. Chat routes use the authenticated identity for per-user storage; existing video routes remain public and are not associated with users.
+- **Authentication:** Username/password auth is exposed in the frontend. Users are JSON-backed, passwords are Argon2-hashed, and opaque session IDs are stored in memory in an HTTP-only cookie. The frontend checks `/auth/me` before rendering the workspace and handles expired protected requests by returning to login. Chat routes use the authenticated identity for per-user storage; existing video routes remain public at the backend and are not associated with users.
 - **CORS/rate limiting:** Not found in codebase.
 
 ## 3. Complete Project File Map
@@ -120,9 +121,9 @@ flowchart TD
 | `frontend/package.json` | Frontend config | npm dependencies/scripts. | `dev`, `build`, and `preview` scripts. |
 | `frontend/vite.config.ts` | Frontend config | Vite/plugin/proxy configuration. | Port 5173 and `/api` proxy to port 8000. |
 | `frontend/src/main.tsx` | Frontend entrypoint | Mounts React app under `#root`. | Wraps `App` in `StrictMode`. |
-| `frontend/src/App.tsx` | Main component | Entire user workflow and UI composition. | State, event handlers, SSE, media preview, transcript, summary, Q&A, recording. |
-| `frontend/src/api.ts` | API client | Typed fetch wrappers. | Centralizes REST calls, event URL, media URL, and time formatting. |
-| `frontend/src/styles.css` | Styling | Full frontend visual system/layout. | Responsive ingestion, processing, transcript, summary, Q&A, notices. |
+| `frontend/src/App.tsx` | Main component | Auth gate, login/register UI, and video workflow composition. | Restores the session, validates auth form input, calls auth methods, handles logout/expiry, and preserves video state/SSE/media/transcript/summary/Q&A/recording workflows. |
+| `frontend/src/api.ts` | API client | Typed cookie-backed fetch wrappers. | Centralizes auth and video REST calls, HTTP error handling, expired-session notification, event/media URLs, and time formatting. |
+| `frontend/src/styles.css` | Styling | Full frontend visual system/layout. | Responsive auth screens and existing ingestion, processing, transcript, summary, Q&A, and notice UI. |
 | `frontend/src/vite-env.d.ts` | Type declarations | Vite environment typing. | Boilerplate declaration file. |
 | `tests/test_health.py` | Tests | Health route test. | Confirms `GET /health`. |
 | `tests/test_auth.py` | Tests | Authentication integration tests. | Registration, duplicate usernames, password hashing, login, session, logout, malformed input, and corrupt storage. |
@@ -176,6 +177,12 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 - `backend/app/schemas/auth.py` validates non-empty passwords and normalizes case-insensitive usernames to lowercase. Allowed usernames contain 1-32 ASCII letters, numbers, dots, underscores, or hyphens.
 - `backend/app/services/auth.py` uses `pwdlib` Argon2 hashes and maintains random session IDs in process memory. Sessions expire after 12 hours and are removed on logout.
 - `backend/app/services/user_storage.py` persists `{ "users": [...] }` in `data/users/users.json`. Writes use a temporary file, flush/fsync, and `os.replace`; missing files start as an empty store and malformed files fail closed with a service-unavailable response.
+
+### Frontend Authentication Flow
+
+`App()` calls `GET /auth/me` on startup while showing a session-check state. A valid response mounts `VideoWorkspace`; a missing or expired session shows `AuthPage` in login mode. The page switches between login and registration, checks username syntax and password confirmation, and reports duplicate usernames, invalid credentials/input, and backend connection failures. Successful registration is followed by `POST /auth/login` because registration does not issue a session cookie.
+
+`frontend/src/api.ts` attaches browser credentials to API requests. The browser stores and sends the backend's HTTP-only cookie; no password or session token is stored in frontend localStorage. Refreshing the page restores the session through `/auth/me`. Logout calls `POST /auth/logout`; a `401` from a protected API request clears the frontend user and returns to login with an expiry message. The existing video workspace component only mounts after session restoration succeeds. This is frontend gating: video API routes themselves remain public and videos are not user-owned.
 
 ### `backend/app/api/videos.py`
 

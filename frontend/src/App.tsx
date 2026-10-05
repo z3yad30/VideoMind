@@ -1,16 +1,23 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   askQuestion,
   askVoiceQuestion,
+  ApiError,
   eventsUrl,
   formatTime,
+  getCurrentUser,
   getStatus,
   getSummary,
   getTranscript,
+  login,
+  logout,
   processYouTube,
+  register,
   resolveMediaUrl,
+  setSessionExpiredHandler,
+  type AuthUser,
   type Answer,
   type ProcessingStatus,
   type ProcessingEvent,
@@ -74,6 +81,132 @@ function SourceList({ source, onJump, canJump }: SourceProps) {
 }
 
 export default function App() {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
+  const [authMessage, setAuthMessage] = useState("");
+
+  useEffect(() => {
+    setSessionExpiredHandler(() => {
+      setUser(null);
+      setAuthMessage("Your session expired. Sign in again to continue.");
+    });
+    return () => setSessionExpiredHandler(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getCurrentUser().then((currentUser) => {
+      if (!cancelled) setUser(currentUser);
+    }).catch((error: unknown) => {
+      if (cancelled) return;
+      if (!(error instanceof ApiError && error.status === 401)) {
+        setAuthMessage(error instanceof Error ? error.message : "Could not check your session.");
+      }
+    }).finally(() => {
+      if (!cancelled) setIsCheckingSession(false);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const signIn = (authenticatedUser: AuthUser) => {
+    setAuthMessage("");
+    setUser(authenticatedUser);
+  };
+
+  const signOut = async () => {
+    try {
+      await logout();
+    } catch {
+      // Clear the local workspace even if the server cannot be reached.
+    }
+    setUser(null);
+    setAuthMessage("");
+  };
+
+  if (isCheckingSession) {
+    return <main className="auth-shell"><div className="auth-loading" role="status">Checking your session...</div></main>;
+  }
+  if (!user) return <AuthPage onAuthenticated={signIn} message={authMessage} />;
+  return <VideoWorkspace username={user.username} onLogout={() => void signOut()} />;
+}
+
+function AuthPage({ onAuthenticated, message }: { onAuthenticated: (user: AuthUser) => void; message: string }) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError("");
+    const normalizedUsername = username.trim();
+    if (!/^[a-zA-Z0-9_.-]{1,32}$/.test(normalizedUsername)) {
+      setError("Use 1-32 letters, numbers, dots, underscores, or hyphens for your username.");
+      return;
+    }
+    if (!password.trim()) {
+      setError("Enter a password to continue.");
+      return;
+    }
+    if (mode === "register" && password !== confirmation) {
+      setError("Those passwords do not match.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      if (mode === "register") await register(normalizedUsername, password);
+      const authenticatedUser = await login(normalizedUsername, password);
+      setPassword("");
+      setConfirmation("");
+      onAuthenticated(authenticatedUser);
+    } catch (caught: unknown) {
+      if (caught instanceof ApiError && caught.status === 409) {
+        setError("That username is already registered. Sign in or choose another username.");
+      } else if (caught instanceof ApiError && caught.status === 422) {
+        setError(caught.message.replace(/^Value error, /, ""));
+      } else {
+        setError(caught instanceof Error ? caught.message : "Authentication failed. Please try again.");
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const switchMode = () => {
+    setMode((current) => current === "login" ? "register" : "login");
+    setError("");
+    setPassword("");
+    setConfirmation("");
+  };
+
+  return <main className="auth-shell">
+    <header className="auth-brand"><div className="brand"><span className="brand-mark">V</span><span>VideoMind</span></div><span className="auth-brand-note">Your video, made searchable</span></header>
+    <section className="auth-panel" aria-labelledby="auth-title">
+      <p className="eyebrow">{mode === "login" ? "Welcome back" : "A clearer way to watch"}</p>
+      <h1 id="auth-title">{mode === "login" ? <>Pick up<br /><em>where you left off.</em></> : <>Make room for<br /><em>better questions.</em></>}</h1>
+      <p className="auth-intro">{mode === "login" ? "Sign in to return to your VideoMind workspace." : "Create an account to start exploring your videos."}</p>
+      {(message || error) && <div className="auth-error" role="alert">{error || message}</div>}
+      <form className="auth-form" onSubmit={(event) => void submit(event)}>
+        <label htmlFor="auth-username">Username</label>
+        <input id="auth-username" name="username" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required maxLength={32} autoFocus />
+        <label htmlFor="auth-password">Password</label>
+        <input id="auth-password" name="password" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} required />
+        {mode === "register" && <>
+          <label htmlFor="auth-confirmation">Confirm password</label>
+          <input id="auth-confirmation" name="confirmation" type="password" autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required />
+        </>}
+        <button className="auth-submit" type="submit" disabled={isSubmitting}>{isSubmitting ? "Please wait..." : mode === "login" ? "Sign in" : "Create account"}<span aria-hidden="true">↗</span></button>
+      </form>
+      <p className="auth-switch">{mode === "login" ? "New to VideoMind?" : "Already have an account?"}<button type="button" onClick={switchMode}>{mode === "login" ? "Create an account" : "Sign in"}</button></p>
+    </section>
+    <p className="auth-footer">Private by design <span>·</span> Your password is never stored in this browser</p>
+  </main>;
+}
+
+function VideoWorkspace({ username, onLogout }: { username: string; onLogout: () => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [sourceUrl, setSourceUrl] = useState("");
   const [videoId, setVideoId] = useState<string | null>(null);
@@ -275,7 +408,7 @@ export default function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark">V</span><span>VideoMind</span></div>
-        <button className="new-button" type="button" onClick={resetWorkspace}>New video <span>+</span></button>
+        <div className="workspace-account"><span>{username}</span><button className="new-button" type="button" onClick={resetWorkspace}>New video <span>+</span></button><button className="new-button" type="button" onClick={onLogout}>Log out</button></div>
       </header>
 
       {!videoId && <section className="hero">

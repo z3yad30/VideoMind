@@ -2,7 +2,7 @@
 
 VideoMind is a local-first MVP for uploading media or processing an authorized YouTube URL, transcribing it, generating a grounded summary, and answering text or voice questions about that specific video.
 
-The backend and Vite frontend are implemented. The backend includes local username/password registration and login with cookie-based sessions, plus persistent user-owned chats. The current deployment model is a single Windows-hosted process with local filesystem artifacts.
+The backend and Vite frontend are implemented. The application requires a username/password account to enter the frontend workspace; the backend provides cookie-based sessions and persistent user-owned chats. The current deployment model is a single Windows-hosted process with local filesystem artifacts.
 
 ## Architecture
 
@@ -40,7 +40,7 @@ The backend uses FastAPI and Uvicorn. Route handlers remain thin; authentication
 
 ```text
 backend/app/       API, services, models, schemas, core, utilities, database
-frontend/           Frontend application (next implementation phase)
+frontend/           React/Vite application with login, registration, and video workspace
 data/               Local runtime media, transcript, summary, Chroma, chat, and user storage
 tests/              Unit and integration tests
 .venv/              Project-root Python virtual environment
@@ -110,7 +110,11 @@ The backend provides username/password registration, login, session inspection, 
 
 Users are stored in `data/users/users.json`. Passwords are hashed with Argon2 through `pwdlib`; plaintext passwords and password hashes are not returned by the API. User-file updates use an atomic temporary-file replacement, and missing user storage is initialized automatically. Authentication does not use a database or frontend localStorage.
 
-Sessions are random server-side identifiers in an HTTP-only cookie and expire after 12 hours. Session state is in memory, so restarting the backend invalidates all sessions. Chat routes require this authenticated session and chats are isolated by owner. Video routes are still public and videos are not account-owned; there is no frontend login UI, and the cookie is configured for local HTTP rather than HTTPS. Do not expose this service to the public internet as-is.
+The frontend opens on a login screen and offers account registration. Registration validates the username and password confirmation, creates the account through `POST /auth/register`, then signs in through `POST /auth/login`. Existing users can sign in directly. Passwords are sent only to the backend over the configured API connection; the frontend does not save passwords in localStorage.
+
+On startup, the frontend calls `GET /auth/me` and only mounts the VideoMind workspace when a valid session is returned. Login sets an HTTP-only, SameSite=Lax session cookie that the browser attaches to subsequent API requests, including after a page refresh. Sessions are random server-side identifiers and expire after 12 hours. Session state is in memory, so restarting the backend invalidates all sessions. A protected API `401` returns the frontend to login, and logout calls `POST /auth/logout` to invalidate the session and clear the cookie.
+
+Chat routes require this authenticated session and chats are isolated by owner. The frontend prevents unauthenticated access to the workspace, but video routes are still public at the backend and videos are not account-owned. The cookie is configured for local HTTP rather than HTTPS. Do not expose this service to the public internet as-is.
 
 ## Persistent Chat Storage
 
@@ -145,7 +149,7 @@ npm install
 npm run dev
 ```
 
-The Vite development server runs at `http://localhost:5173` and proxies `/api` requests to the backend at `http://127.0.0.1:8000`. Start the backend separately before using upload, YouTube processing, transcript, summary, or question workflows.
+The Vite development server runs at `http://localhost:5173` and proxies `/api` requests to the backend at `http://127.0.0.1:8000`. Start the backend separately before registering or signing in, and before using upload, YouTube processing, transcript, summary, or question workflows. Create an account from the login screen, or sign in with an existing account; the session survives page refreshes until logout, backend restart, or its 12-hour expiry.
 
 The Python virtual environment installs backend dependencies from `requirements.txt`. Frontend dependencies cannot be installed into that environment because React and Vite are Node/npm packages. Install them once with `npm install` inside `frontend`; validate the production bundle with `npm run build`.
 

@@ -1,5 +1,20 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
+export type AuthUser = { username: string };
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+let onSessionExpired: (() => void) | null = null;
+
+export function setSessionExpiredHandler(handler: (() => void) | null) {
+  onSessionExpired = handler;
+}
+
 export type ProcessingStatus =
   | "queued"
   | "validating"
@@ -59,18 +74,50 @@ function apiUrl(path: string) {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(apiUrl(path), options);
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(path), { ...options, credentials: "include" });
+  } catch {
+    throw new Error("Can't reach the VideoMind server. Check that the backend is running and try again.");
+  }
+  if (response.status === 401 && !path.startsWith("/auth/")) onSessionExpired?.();
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try {
       const body = await response.json();
-      message = body.detail || message;
+      if (typeof body.detail === "string") message = body.detail;
+      else if (Array.isArray(body.detail)) message = body.detail.map((item: { msg?: string }) => item.msg).filter(Boolean).join(" ") || message;
     } catch {
       // Keep the HTTP status message when the server did not return JSON.
     }
-    throw new Error(message);
+    throw new ApiError(message, response.status);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+
+export function getCurrentUser() {
+  return request<AuthUser>("/auth/me");
+}
+
+export function login(username: string, password: string) {
+  return request<AuthUser>("/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export function register(username: string, password: string) {
+  return request<AuthUser>("/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export function logout() {
+  return request<void>("/auth/logout", { method: "POST" });
 }
 
 export function uploadVideo(file: File) {
