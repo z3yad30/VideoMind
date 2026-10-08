@@ -93,6 +93,7 @@ export type ChatQuestionResponse = {
   sources: QuestionSource[];
   answer_audio_location: string | null;
 };
+export type ChatAnswerAudioResponse = { answer_audio_ref: string };
 export type VoiceAnswer = Answer & {
   transcribed_question: string;
   audio_answer_location: string;
@@ -201,6 +202,32 @@ export function askChatQuestion(chatId: string, question: string) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question }),
   });
+}
+
+export function generateChatAnswerAudio(chatId: string, messageId: string) {
+  return request<ChatAnswerAudioResponse>(`/chats/${chatId}/messages/${messageId}/audio`, { method: "POST" });
+}
+
+export async function fetchChatAnswerAudio(chatId: string, messageId: string) {
+  const path = `/chats/${chatId}/messages/${messageId}/audio`;
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(path), { credentials: "include" });
+  } catch {
+    throw new Error("Can't reach the VideoMind server. Check that the backend is running and try again.");
+  }
+  if (response.status === 401) onSessionExpired?.();
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
+    try {
+      const body = await response.json();
+      if (typeof body.detail === "string") message = body.detail;
+    } catch {
+      // Keep the HTTP status message when the server did not return JSON.
+    }
+    throw new ApiError(message, response.status);
+  }
+  return response.blob();
 }
 
 export function askQuestion(videoId: string, question: string) {

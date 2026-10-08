@@ -1,0 +1,172 @@
+{
+  "chat_id": "73a694e2739f4202b21d6f39a469f4c4",
+  "username": "zeyad",
+  "title": "hi",
+  "created_at": "2026-10-08T08:29:27.372832Z",
+  "updated_at": "2026-10-08T08:29:59.694618Z",
+  "video_id": "a54720151ae6439686db663a67fd75ed",
+  "video_metadata": null,
+  "summary": null,
+  "transcript": null,
+  "messages": [
+    {
+      "id": "1d05eee4eac1411f8c9170dce8a91f78",
+      "role": "user",
+      "content": "hi",
+      "timestamp": "2026-10-08T08:29:32.350890Z",
+      "sources": [],
+      "timestamps": [],
+      "answer_audio_ref": null
+    },
+    {
+      "id": "2d79f9c4ec69430fa40eb11e5aa67390",
+      "role": "assistant",
+      "content": "Hello! How can I help you today? If you have any questions about the video, feel free to ask.",
+      "timestamp": "2026-10-08T08:29:33.803879Z",
+      "sources": [
+        {
+          "start": 189.24,
+          "end": 191.35999999999999,
+          "text": " can stop them from infecting humans."
+        },
+        {
+          "start": 191.35999999999999,
+          "end": 191.64,
+          "text": " Thanks."
+        }
+      ],
+      "timestamps": [
+        189.24,
+        191.35999999999999,
+        191.64
+      ],
+      "answer_audio_ref": "/chats/73a694e2739f4202b21d6f39a469f4c4/messages/2d79f9c4ec69430fa40eb11e5aa67390/audio/8e25fffdbd974c9eb88a43c77b6b3a67"
+    },
+    {
+      "id": "709d58b24b054ab281e738284ae51865",
+      "role": "user",
+      "content": "what is this video about ?",
+      "timestamp": "2026-10-08T08:29:57.089450Z",
+      "sources": [],
+      "timestamps": [],
+      "answer_audio_ref": null
+    },
+    {
+      "id": "f59007e7689a4dba8ef7c9bca1d7372a",
+      "role": "assistant",
+      "content": "The video is a presentation of a research project that investigates why some locations become \u201chot spots\u201d for disease and how that can be detected and monitored.  \n\n- The speaker asks why certain areas \u201cbreed disease\u201d and notes that understanding the **environmental factors** that aid transmission could allow later detection of outbreaks\u301055.68\u201164.32\u3011.  \n- They describe using a **broad\u2011scale virus survey** that had never been done before, which required them to **adapt a new technique**\u301090.4\u201195.12\u3011.  \n- After gathering the needed virus data, they combine it with **publicly available environmental data**\u2014such as human\u2011housing density, mammal biodiversity, and the ratio of green space to buildings\u2014to see whether these factors explain the observed virus hotspots\u3010125.32\u2011144.88\u3011.  \n- The method has been successful, attracting interest from **public\u2011health officials in Victoria, Queensland and Western Australia** who want to use it for surveillance next year\u3010149.0\u2011156.76\u3011.  \n- The traps were built on a **tight budget**, with an eye toward use in **economically impoverished countries**; the speaker cites India\u2019s high dengue burden as an example\u3010169.92\u2011180.04\u3011.  \n\nIn short, the video explains a novel, low\u2011cost trapping and surveillance approach for detecting viruses, explores how environmental conditions relate to disease hotspots, and discusses its potential application in public\u2011health monitoring, especially in resource\u2011limited settings.",
+      "timestamp": "2026-10-08T08:29:58.629302Z",
+      "sources": [
+        {
+          "start": 55.68,
+          "end": 57.08,
+          "text": " My question is why?"
+        },
+        {
+          "start": 57.08,
+          "end": 60.08,
+          "text": " What is it about certain areas that makes them breed disease?"
+        },
+        {
+          "start": 60.08,
+          "end": 64.32,
+          "text": " If we can understand the environmental factors that contribute to disease transmission, then"
+        },
+        {
+          "start": 88.68,
+          "end": 90.4,
+          "text": " it can later be detected."
+        },
+        {
+          "start": 90.4,
+          "end": 94.12,
+          "text": " Now no one had ever used this technique in a broad-scale virus survey before, so I had to"
+        },
+        {
+          "start": 94.12,
+          "end": 95.12,
+          "text": " adapt it."
+        },
+        {
+          "start": 125.32,
+          "end": 130.08,
+          "text": " I now have the virus data I need to conduct my analysis, and I'm collecting publicly available"
+        },
+        {
+          "start": 130.08,
+          "end": 134.8,
+          "text": " data about the environment surrounding my traps, like the density of human housing, the"
+        },
+        {
+          "start": 134.8,
+          "end": 139.56,
+          "text": " biodiversity of mammals, and the ratio of green space to buildings to see if any of those"
+        },
+        {
+          "start": 139.56,
+          "end": 144.88,
+          "text": " environmental factors can link these virus hotspots that I've shown here."
+        },
+        {
+          "start": 144.88,
+          "end": 149.0,
+          "text": " But the most exciting part of my research so far has been the success of this method."
+        },
+        {
+          "start": 149.0,
+          "end": 152.56,
+          "text": " Public health officials in Victoria, Queensland, and Western Australia have been in contact"
+        },
+        {
+          "start": 152.56,
+          "end": 156.76,
+          "text": " with us about implementing this technique for their surveillance next year."
+        },
+        {
+          "start": 156.76,
+          "end": 158.68,
+          "text": " And I developed these traps in a tight budget."
+        },
+        {
+          "start": 169.92,
+          "end": 172.07999999999998,
+          "text": " economically impoverished countries."
+        },
+        {
+          "start": 172.07999999999998,
+          "end": 176.2,
+          "text": " In India, for example, where about a quarter of the population lives on a dollar a day, there"
+        },
+        {
+          "start": 176.2,
+          "end": 180.04,
+          "text": " are 33 million cases of dengue infection every year."
+        }
+      ],
+      "timestamps": [
+        55.68,
+        57.08,
+        60.08,
+        64.32,
+        88.68,
+        90.4,
+        94.12,
+        95.12,
+        125.32,
+        130.08,
+        134.8,
+        139.56,
+        144.88,
+        149.0,
+        152.56,
+        156.76,
+        158.68,
+        169.92,
+        172.07999999999998,
+        176.2,
+        180.04
+      ],
+      "answer_audio_ref": "/chats/73a694e2739f4202b21d6f39a469f4c4/messages/f59007e7689a4dba8ef7c9bca1d7372a/audio/b73a22e9048347ba91ac881535e83d2a"
+    }
+  ]
+}

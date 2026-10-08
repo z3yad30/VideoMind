@@ -30,6 +30,12 @@ class ChatMessage(BaseModel):
     answer_audio_ref: str | None = None
 
 
+def _reject_client_audio_refs(messages: list[ChatMessage]) -> list[ChatMessage]:
+    if any(message.answer_audio_ref is not None for message in messages):
+        raise ValueError("Answer audio references are managed by the server")
+    return messages
+
+
 class ChatCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -39,6 +45,11 @@ class ChatCreate(BaseModel):
     summary: dict[str, str] | None = None
     transcript: dict[str, Any] | None = None
     messages: list[ChatMessage] = Field(default_factory=list)
+
+    @field_validator("messages")
+    @classmethod
+    def validate_message_audio_refs(cls, value: list[ChatMessage]) -> list[ChatMessage]:
+        return _reject_client_audio_refs(value)
 
     @field_validator("video_id")
     @classmethod
@@ -57,6 +68,11 @@ class ChatUpdate(BaseModel):
     summary: dict[str, str] | None = None
     transcript: dict[str, Any] | None = None
     messages: list[ChatMessage] | None = None
+
+    @field_validator("messages")
+    @classmethod
+    def validate_message_audio_refs(cls, value: list[ChatMessage] | None) -> list[ChatMessage] | None:
+        return _reject_client_audio_refs(value) if value is not None else None
 
     @field_validator("video_id")
     @classmethod

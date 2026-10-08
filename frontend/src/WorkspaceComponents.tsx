@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatListItem, ChatMessage, ProcessingEvent, ProcessingStage, Summary, TranscriptSegment } from "./api";
+import { ApiError, fetchChatAnswerAudio, generateChatAnswerAudio, type ChatListItem, type ChatMessage, type ProcessingEvent, type ProcessingStage, type Summary, type TranscriptSegment } from "./api";
 import { formatTime, resolveMediaUrl } from "./api";
 
 export type WorkspaceView = "chat" | "new-video" | "summary" | "video" | "transcript";
@@ -53,7 +53,8 @@ export function ChatSidebar({ username, chats, selectedChatId, activeView, video
   </>;
 }
 
-export function ChatWindow({ chatTitle, messages, hasVideo, videoReady, isLoading, isAsking, question, onQuestionChange, onSubmit, onMenu, onJump }: {
+export function ChatWindow({ chatId, chatTitle, messages, hasVideo, videoReady, isLoading, isAsking, question, onQuestionChange, onSubmit, onMenu, onJump, onAudioRef }: {
+  chatId: string | null;
   chatTitle: string;
   messages: ChatMessage[];
   hasVideo: boolean;
@@ -65,6 +66,7 @@ export function ChatWindow({ chatTitle, messages, hasVideo, videoReady, isLoadin
   onSubmit: () => void;
   onMenu: () => void;
   onJump: (seconds: number) => void;
+  onAudioRef: (messageId: string, audioRef: string) => void;
 }) {
   const feedRef = useRef<HTMLDivElement>(null);
   const submit = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); onSubmit(); };
@@ -84,19 +86,103 @@ export function ChatWindow({ chatTitle, messages, hasVideo, videoReady, isLoadin
     <div className="chat-feed" ref={feedRef} aria-live="polite">
       {isLoading && <div className="chat-state"><span className="loading-spinner" />Loading conversation...</div>}
       {!isLoading && messages.length === 0 && <div className="chat-welcome"><span className="welcome-mark">V</span><h2>{hasVideo ? "What would you like to know?" : "Start with a video"}</h2><p>{hasVideo ? "Ask a question about the selected video. Your conversation will be saved here." : "Choose New video to process a source, or open one of your saved conversations."}</p></div>}
-      {!isLoading && [...messages].sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)).map((message) => <ChatMessage key={message.id} message={message} onJump={onJump} canJump={videoReady} />)}
+      {!isLoading && [...messages].sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)).map((message) => <ChatMessage key={message.id} chatId={chatId} message={message} onJump={onJump} canJump={videoReady} onAudioRef={onAudioRef} />)}
       {isAsking && <div className="assistant-pending"><span className="loading-spinner" /><span>Thinking through the video...</span></div>}
     </div>
     <form className="chat-composer" onSubmit={submit}>{!videoReady && <p className="composer-note">{hasVideo ? "Questions will be available when video processing finishes." : "Select or process a video before asking questions."}</p>}<div className="composer-box"><textarea aria-label="Message" placeholder={videoReady ? "Ask anything about this video..." : "Ask about your video"} rows={1} value={question} onChange={(event) => onQuestionChange(event.target.value)} onKeyDown={submitOnEnter} disabled={!videoReady || isAsking || isLoading} /><button type="submit" className="send-button" aria-label={isAsking ? "Sending message" : "Send message"} disabled={!videoReady || !question.trim() || isAsking || isLoading}>{isAsking ? <span className="send-pulse">···</span> : "↑"}</button></div><span className="composer-hint">Enter to send · Shift + Enter for a new line</span></form>
   </section>;
 }
 
-function ChatMessage({ message, onJump, canJump }: { message: ChatMessage; onJump: (seconds: number) => void; canJump: boolean }) {
+function AnswerAudioButton({ chatId, message, onAudioRef }: { chatId: string | null; message: ChatMessage; onAudioRef: (messageId: string, audioRef: string) => void }) {
+  const [playback, setPlayback] = useState<"idle" | "loading" | "playing">("idle");
+  const [hasError, setHasError] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+  const loadingRef = useRef(false);
+
+  useEffect(() => () => {
+    audioRef.current?.pause();
+    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+  }, []);
+
+  const togglePlayback = async () => {
+    if (loadingRef.current || !chatId) return;
+    if (playback === "playing" && audioRef.current) {
+      audioRef.current.pause();
+      setPlayback("idle");
+      return;
+    }
+
+    loadingRef.current = true;
+    setPlayback("loading");
+    setHasError(false);
+    try {
+      if (!message.answer_audio_ref) {
+        const generated = await generateChatAnswerAudio(chatId, message.id);
+        onAudioRef(message.id, generated.answer_audio_ref);
+      }
+      if (!audioRef.current) {
+        let audioBlob: Blob;
+        try {
+          audioBlob = await fetchChatAnswerAudio(chatId, message.id);
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.status !== 404) throw error;
+          const generated = await generateChatAnswerAudio(chatId, message.id);
+          onAudioRef(message.id, generated.answer_audio_ref);
+          audioBlob = await fetchChatAnswerAudio(chatId, message.id);
+        }
+        const objectUrl = URL.createObjectURL(audioBlob);
+        objectUrlRef.current = objectUrl;
+        const audio = new Audio(objectUrl);
+        audio.onended = () => setPlayback("idle");
+        audio.onpause = () => setPlayback("idle");
+        audio.onerror = () => {
+          setPlayback("idle");
+          setHasError(true);
+        };
+        audioRef.current = audio;
+      }
+      if (audioRef.current.ended) audioRef.current.currentTime = 0;
+      await audioRef.current.play();
+      setPlayback("playing");
+    } catch {
+      audioRef.current?.pause();
+      audioRef.current = null;
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+      setPlayback("idle");
+      setHasError(true);
+    } finally {
+      loadingRef.current = false;
+    }
+  };
+
+  const label = playback === "loading" ? "Loading answer audio" : playback === "playing" ? "Pause answer audio" : hasError ? "Retry answer audio" : "Play answer audio";
+  return <span className="answer-audio-control"><button className={`answer-audio-button ${playback === "playing" ? "is-playing" : ""}`} type="button" aria-label={label} title={label} disabled={!chatId || playback === "loading"} onClick={() => void togglePlayback()}>
+    {playback === "loading" ? <span className="loading-spinner" aria-hidden="true" /> : playback === "playing" ? <span aria-hidden="true">Ⅱ</span> : <span aria-hidden="true">🔊</span>}
+  </button>{hasError && <span className="answer-audio-error" role="status">Audio unavailable</span>}</span>;
+}
+
+function ChatMessage({ chatId, message, onJump, canJump, onAudioRef }: { chatId: string | null; message: ChatMessage; onJump: (seconds: number) => void; canJump: boolean; onAudioRef: (messageId: string, audioRef: string) => void }) {
   const [sourcesExpanded, setSourcesExpanded] = useState(false);
   const sourcesId = useId();
   const isUser = message.role === "user";
   if (message.role === "system") return null;
-  return <article className={`chat-message ${isUser ? "from-user" : "from-assistant"}`}><div className="message-avatar" aria-hidden="true">{isUser ? "Y" : "V"}</div><div className="message-content"><div className="message-meta"><strong>{isUser ? "You" : "VideoMind"}</strong><time dateTime={message.timestamp}>{new Date(message.timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></div>{isUser ? <p className="message-user-text">{message.content}</p> : <div className="message-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>}{!isUser && message.sources.length > 0 && <div className="message-sources"><button className="message-sources-toggle" type="button" aria-expanded={sourcesExpanded} aria-controls={sourcesId} onClick={() => setSourcesExpanded((expanded) => !expanded)}><span className={`source-chevron ${sourcesExpanded ? "expanded" : ""}`} aria-hidden="true">›</span><span>Relevant transcript / Sources</span><span className="source-count">{message.sources.length}</span></button><div className="message-source-list" id={sourcesId} hidden={!sourcesExpanded}>{message.sources.map((source, index) => <div className="message-source-item" key={`${source.start}-${index}`}><div className="message-source-times"><button type="button" onClick={() => onJump(source.start)} disabled={!canJump} aria-label={`Seek to ${formatTime(source.start)}`}><span>Start</span><time>{formatTime(source.start)}</time></button><button type="button" onClick={() => onJump(source.end)} disabled={!canJump} aria-label={`Seek to ${formatTime(source.end)}`}><span>End</span><time>{formatTime(source.end)}</time></button></div><p>{source.text}</p></div>)}</div></div>}</div></article>;
+  return <article className={`chat-message ${isUser ? "from-user" : "from-assistant"}`}>
+    <div className="message-avatar" aria-hidden="true">{isUser ? "Y" : "V"}</div>
+    <div className="message-content">
+      <div className="message-meta">
+        <strong>{isUser ? "You" : "VideoMind"}</strong>
+        <time dateTime={message.timestamp}>{new Date(message.timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time>
+        {!isUser && <AnswerAudioButton chatId={chatId} message={message} onAudioRef={onAudioRef} />}
+      </div>
+      {isUser ? <p className="message-user-text">{message.content}</p> : <div className="message-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>}
+      {!isUser && message.sources.length > 0 && <div className="message-sources">
+        <button className="message-sources-toggle" type="button" aria-expanded={sourcesExpanded} aria-controls={sourcesId} onClick={() => setSourcesExpanded((expanded) => !expanded)}><span className={`source-chevron ${sourcesExpanded ? "expanded" : ""}`} aria-hidden="true">›</span><span>Relevant transcript / Sources</span><span className="source-count">{message.sources.length}</span></button>
+        <div className="message-source-list" id={sourcesId} hidden={!sourcesExpanded}>{message.sources.map((source, index) => <div className="message-source-item" key={`${source.start}-${index}`}><div className="message-source-times"><button type="button" onClick={() => onJump(source.start)} disabled={!canJump} aria-label={`Seek to ${formatTime(source.start)}`}><span>Start</span><time>{formatTime(source.start)}</time></button><button type="button" onClick={() => onJump(source.end)} disabled={!canJump} aria-label={`Seek to ${formatTime(source.end)}`}><span>End</span><time>{formatTime(source.end)}</time></button></div><p>{source.text}</p></div>)}</div>
+      </div>}
+    </div>
+  </article>;
 }
 
 export function NewVideoPanel({ fileName, sourceUrl, isSubmitting, onFile, onUrlChange, onStart }: {

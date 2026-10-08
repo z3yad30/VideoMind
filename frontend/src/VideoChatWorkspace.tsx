@@ -266,13 +266,24 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
     setActiveView("video");
   };
 
+  const updateAnswerAudioRef = (messageId: string, audioRef: string) => {
+    const chatId = selectedChatId;
+    if (!chatId) return;
+    setSelectedChat((current) => current?.chat_id === chatId ? {
+      ...current,
+      messages: current.messages.map((message) => message.id === messageId
+        ? { ...message, answer_audio_ref: audioRef }
+        : message),
+    } : current);
+  };
+
   const themeToggle = <button className="theme-toggle" type="button" onClick={onThemeToggle} aria-label={`Current theme: ${theme}. Switch theme.`} title="Switch theme"><span aria-hidden="true">◐</span>{theme === "dark-modern" ? "Dark" : "Light"}</button>;
   const title = selectedChat?.title || (selectedChat?.video_id ? "Video conversation" : "New conversation");
 
   return <main className="chat-workspace">
     <ChatSidebar username={username} chats={chats} selectedChatId={selectedChatId} activeView={activeView} videoReady={videoReady} isLoadingChats={isLoadingChats} isOpen={isSidebarOpen} onClose={() => setSidebarOpen(false)} onView={setActiveView} onNewChat={() => void startNewChat()} onSelectChat={(chatId) => void loadChat(chatId)} onLogout={onLogout} themeToggle={themeToggle} />
     <div className="chat-main">
-      {activeView === "chat" && <ChatWindow chatTitle={title} messages={selectedChat?.messages || []} hasVideo={Boolean(videoId)} videoReady={videoReady} isLoading={isLoadingChat} isAsking={isAsking} question={question} onQuestionChange={setQuestion} onSubmit={() => void ask()} onMenu={() => setSidebarOpen(true)} onJump={jumpTo} />}
+      {activeView === "chat" && <ChatWindow chatId={selectedChatId} chatTitle={title} messages={selectedChat?.messages || []} hasVideo={Boolean(videoId)} videoReady={videoReady} isLoading={isLoadingChat} isAsking={isAsking} question={question} onQuestionChange={setQuestion} onSubmit={() => void ask()} onMenu={() => setSidebarOpen(true)} onJump={jumpTo} onAudioRef={updateAnswerAudioRef} />}
       {activeView === "new-video" && isProcessing && <ProcessingPanel status={status?.status || "queued"} stages={stages} activity={activity} />}
       {activeView === "new-video" && !isProcessing && <NewVideoPanel fileName={file?.name || ""} sourceUrl={sourceUrl} isSubmitting={isSubmitting} onFile={(nextFile) => { setFile(nextFile); setSourceUrl(""); }} onUrlChange={(url) => { setSourceUrl(url); setFile(null); }} onStart={() => void startProcessing()} />}
       {activeView === "summary" && <SummaryPanel summary={summary} />}

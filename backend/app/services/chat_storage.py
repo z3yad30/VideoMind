@@ -103,6 +103,18 @@ class ChatStore:
             self._write(updated)
         return updated
 
+    def set_message_audio_ref(self, username: str, chat_id: str, message_id: str, audio_ref: str) -> ChatMessage | None:
+        path = self._chat_path(username, chat_id)
+        with self._lock:
+            record = self._read(path, username)
+            messages = list(record.messages)
+            for index, message in enumerate(messages):
+                if message.id == message_id and message.role == "assistant":
+                    messages[index] = message.model_copy(update={"answer_audio_ref": audio_ref})
+                    self._write(record.model_copy(update={"updated_at": utc_now(), "messages": messages}))
+                    return messages[index]
+        return None
+
     def delete(self, username: str, chat_id: str) -> None:
         path = self._chat_path(username, chat_id)
         with self._lock:

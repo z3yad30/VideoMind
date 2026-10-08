@@ -25,8 +25,8 @@ The frontend implements a cookie-backed login/register experience and gates a ch
 | User identity dependency | `backend/app/api/dependencies.py` | Resolves the current request's session cookie for protected chat routes. |
 | Authentication and sessions | `backend/app/services/auth.py` | Hashes/verifies passwords and manages expiring in-memory sessions. |
 | User storage | `backend/app/services/user_storage.py` | Reads users and atomically writes `data/users/users.json`. |
-| Persistent chat API | `backend/app/api/chats.py` | Authenticated chat CRUD and chat question flow; derives owner only from the session identity and connects owned chats to video Q&A. |
-| Chat schemas/storage | `backend/app/schemas/chats.py`, `backend/app/services/chat_storage.py` | Validates chat payloads, appends messages, and atomically stores one JSON file per chat under its username. |
+| Persistent chat API | `backend/app/api/chats.py` | Authenticated chat CRUD/Q&A plus owner-checked answer-audio retrieval and retry generation. |
+| Chat schemas/storage | `backend/app/schemas/chats.py`, `backend/app/services/chat_storage.py` | Validates chat payloads, appends messages, and atomically stores one JSON file per chat under its username, including audio references only. |
 | File ingestion | `backend/app/api/videos.py:upload_video()` | Accepts multipart media, validates extension, saves it under a generated ID, and starts processing. |
 | YouTube ingestion | `backend/app/api/videos.py:process_youtube()` | Validates a YouTube URL, downloads it as a persistent source, and starts background processing. |
 | Source media persistence | `backend/app/services/media.py:MediaService.download_youtube()` / `backend/app/services/video_processing.py` | Saves YouTube downloads to `data/videos/{video_id}{extension}` and keeps them after processing. |
@@ -40,7 +40,7 @@ The frontend implements a cookie-backed login/register experience and gates a ch
 | Voice questions | `backend/app/services/voice.py:VoiceQuestionService` | Transcribes a microphone file, asks the same RAG/LLM question path, and synthesizes the answer. |
 | Browser UI and auth gate | `frontend/src/App.tsx:App()` | Restores the session, renders login/register when signed out, and mounts the chat workspace when signed in. |
 | Chat workspace state | `frontend/src/VideoChatWorkspace.tsx` | Loads saved chats, restores selected-video context, creates sibling chats, handles ingestion events, and submits persistent chat questions. |
-| Workspace components | `frontend/src/WorkspaceComponents.tsx` | Renders the responsive sidebar, chat history/messages/composer, ingestion, processing, summary, video, and transcript views. |
+| Workspace components | `frontend/src/WorkspaceComponents.tsx` | Renders the responsive workspace and independent assistant-answer play/loading/error controls. |
 | Frontend API client | `frontend/src/api.ts` | Sends cookie-backed auth, chat, and video requests, formats API errors, and signals expired protected sessions. |
 
 ## 2. High-Level Architecture
@@ -100,7 +100,7 @@ flowchart TD
 | `backend/app/main.py` | Backend entrypoint | Builds the FastAPI application. | Configures logging and registers auth, chat, health, and video routers. |
 | `backend/app/api/auth.py` | Route module | Authentication HTTP endpoints. | Implements `POST /auth/register`, `POST /auth/login`, `GET /auth/me`, and `POST /auth/logout`. |
 | `backend/app/api/dependencies.py` | Route dependency | Current-user resolution. | Implements `get_current_user()` for protected chat routes using the HTTP-only session cookie. |
-| `backend/app/api/chats.py` | Route module | Persistent chat HTTP endpoints. | Implements authenticated list/create/read/update/delete operations. |
+| `backend/app/api/chats.py` | Route module | Persistent chat HTTP endpoints. | Implements authenticated chat CRUD/Q&A and owner-checked answer-audio retrieval/retry generation. |
 | `backend/app/api/health.py` | Route module | Health endpoint. | Implements `GET /health`. |
 | `backend/app/api/videos.py` | Route module | Video ingestion, status, transcript, summary, Q&A, audio routes. | Owns HTTP validation/response mapping and starts processing tasks. |
 | `backend/app/core/config.py` | Configuration | Loads root `.env` and creates frozen `Settings`. | Defines model, size, timeout, logging, and question limits. |
@@ -131,7 +131,7 @@ flowchart TD
 | `frontend/src/vite-env.d.ts` | Type declarations | Vite environment typing. | Boilerplate declaration file. |
 | `tests/test_health.py` | Tests | Health route test. | Confirms `GET /health`. |
 | `tests/test_auth.py` | Tests | Authentication integration tests. | Registration, duplicate usernames, password hashing, login, session, logout, malformed input, and corrupt storage. |
-| `tests/test_chats.py` | Tests | Chat API/storage integration tests. | CRUD/list, persistence reload, ownership enforcement, malformed JSON, and unsafe IDs. |
+| `tests/test_chats.py` | Tests | Chat API/storage integration tests. | CRUD/list, persistence reload, audio generation deduplication/playback ownership, malformed JSON, and unsafe IDs. |
 | `tests/test_video_processing.py` | Tests | Media/job/API processing tests. | Timestamps, cleanup, events, failures, validation, YouTube, concurrency, artifact IDs. |
 | `tests/test_rag.py` | Tests | RAG tests. | Chunk retrieval, metadata timestamps, isolation, empty/missing collections, backend errors. |
 | `tests/test_llm.py` | Tests | LLM/AI tests. | Model default, prompts, hierarchical summaries, no-context behavior, error normalization. |
@@ -142,7 +142,7 @@ flowchart TD
 | `data/audio/` | Runtime storage | Summary and answer WAV files. | Summary audio and answer audio paths. |
 | `data/chroma/` | Runtime storage | Persistent vector store. | Per-video Chroma collections. |
 | `data/users/users.json` | Runtime storage | Local user records. | Normalized usernames and Argon2 password hashes; never stores plaintext passwords. |
-| `data/chats/{username}/{chat_id}.json` | Runtime storage | One persistent chat per JSON file, grouped by authenticated username. | Complete message history and chat metadata; video ID links to canonical transcript/summary artifacts. |
+| `data/chats/{username}/{chat_id}.json` | Runtime storage | One persistent chat per JSON file, grouped by authenticated username. | Complete message history and metadata; assistant messages store scoped audio references, never WAV bytes. |
 
 Generated dependencies, caches, `__pycache__`, and build output are excluded from this map.
 
@@ -192,7 +192,7 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 - **Layout:** `ChatSidebar` provides New video, New chat, current-video Summary/Video/Transcript navigation, saved chats with title and updated date, theme control, and logout. `ChatWindow` fills the remaining viewport with the full chronological conversation and a composer anchored at the bottom. On narrow screens, the sidebar becomes a dismissible drawer.
 - **Chat loading:** `VideoChatWorkspace` calls `GET /chats` for the signed-in user and opens the newest chat. Selecting a saved item calls `GET /chats/{chat_id}` and restores its complete message list, video ID, summary, and transcript. Video status and available canonical artifacts use the existing video endpoints. Chat history is never treated as localStorage state.
-- **Question flow:** The composer submits through `POST /chats/{chat_id}/messages`, blocks duplicate sends while pending, and appends the server-returned persisted user and assistant messages in timestamp order. Markdown answers remain visible; each assistant message's Relevant transcript / Sources disclosure is collapsed by default and toggles independently. Expanded evidence shows transcript excerpts with start/end timestamp buttons that seek playback.
+- **Question flow:** The composer submits through `POST /chats/{chat_id}/messages`, blocks duplicate sends while pending, and appends the server-returned persisted user and assistant messages in timestamp order. Every assistant answer has an independent explicit-click sound control; loading, playing, and recoverable error states do not affect the independent collapsed-by-default source disclosure. Missing audio is generated through the existing voice service, and its reference is saved to the message. Reopening a chat restores that reference.
 - **New video versus new chat:** New video opens the existing file/YouTube ingestion flow; once processing reports completion, the frontend creates a chat attached to that video. New chat calls `POST /chats` with the current video ID and does not call upload or YouTube processing.
 - **Component structure:** `App.tsx` owns auth and session gating; `VideoChatWorkspace.tsx` owns API and workflow state; `WorkspaceComponents.tsx` contains the sidebar, chat, ingestion, processing, and video-context panels; `api.ts` defines typed backend calls; `styles.css` implements themes and responsive layout.
 
@@ -281,11 +281,11 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 ### Persistent Chat Q&A Integration
 
-**Architecture:** `POST /chats/{chat_id}/messages` authenticates the session owner, loads the chat through owner-scoped storage, requires its `video_id`, and checks that the corresponding in-process video job is complete. It delegates to `VideoAIService.answer_question` with the chat's video ID, so retrieval uses the existing per-video Chroma collection, similarity filter, and raw-transcript fallback. It reuses `VoiceQuestionService.synthesize_answer` for optional answer audio; the existing video answer-audio route serves the WAV.
+**Architecture:** `POST /chats/{chat_id}/messages` authenticates the session owner, loads the chat through owner-scoped storage, requires its `video_id`, and checks that the corresponding in-process video job is complete. It delegates to `VideoAIService.answer_question` with the chat's video ID, so retrieval uses the existing per-video Chroma collection, similarity filter, and raw-transcript fallback. It reuses `VoiceQuestionService.synthesize_answer` for optional answer audio. Chat playback uses authenticated `GET /chats/{chat_id}/messages/{message_id}/audio`; missing audio can be generated with the matching `POST` route. Both verify chat ownership, while the existing video answer-audio endpoint remains for voice-question playback.
 
 **Request/response flow:** the request body is `{"question": "..."}`. The endpoint atomically appends the user message before AI work, calls the existing Q&A pipeline with at most three prior chat messages, then appends and returns the assistant message. The response includes `user_message`, `assistant_message`, `sources`, and optional `answer_audio_location`. The assistant record preserves answer text, source text and start/end times, source timestamps, audio reference when generated, and its creation timestamp. A chat without `video_id` returns `400`; unavailable videos return `404`; unfinished jobs return `409`.
 
-**Persistence:** both messages are stored in the owner's existing `data/chats/{username}/{chat_id}.json` using the chat store's atomic replacement. The full ordered conversation is returned by `GET /chats/{chat_id}` after reload; it is not sent in full to Groq. If answering fails after the user message was saved, that user message remains persisted for a retry. TTS failure does not discard the answer; its audio reference is omitted.
+**Persistence:** both messages are stored in the owner's existing `data/chats/{username}/{chat_id}.json` using the chat store's atomic replacement. Assistant audio references are scoped to the owning chat and message and point to a WAV under `data/audio/answers/{video_id}/{answer_id}.wav`; chat JSON never contains audio binary. The full ordered conversation and references return from `GET /chats/{chat_id}` after reload; history is not sent in full to Groq. If answering fails after the user message was saved, that user message remains persisted for a retry. TTS failure does not discard the answer; its missing reference can be generated when the user clicks the control. Pending generation is serialized per message and playback remains an explicit user action.
 
 **Tests:** `tests/test_chats.py` covers authenticated owned-chat Q&A, both persisted messages, source/timestamp/audio fields, history reload, foreign-owner rejection, unavailable/missing video handling, and only the last three prior messages passed to the AI service. `tests/test_llm.py` verifies chat context truncation without using process-global history. Existing RAG tests cover video collection isolation, similarity thresholds, and raw-transcript fallback; `tests/test_video_processing.py` confirms standalone video Q&A remains operational.
 
@@ -1083,10 +1083,12 @@ For normal video-linked chats, the record keeps the video ID and leaves large tr
 - `GET /chats`: list the current user's chats.
 - `POST /chats`: create a chat with a server-generated chat ID.
 - `GET /chats/{chat_id}`: retrieve a chat and available video context.
+- `POST /chats/{chat_id}/messages/{message_id}/audio`: idempotently generate missing answer audio with the existing voice service and persist its reference.
+- `GET /chats/{chat_id}/messages/{message_id}/audio`: stream a saved assistant WAV after verifying the authenticated owner and message reference.
 - `PUT /chats/{chat_id}`: update metadata/content for an owned chat.
 - `DELETE /chats/{chat_id}`: delete an owned chat.
 
-All routes use `get_current_user()` from `backend/app/api/dependencies.py`. The username comes only from the authenticated session; request bodies cannot select an owner. Store lookups are always rooted in that username's directory, so foreign and missing chat IDs have the same `404` response. Invalid IDs receive `422`, and malformed stored JSON fails closed with `503` without exposing filesystem paths. This ownership applies to chats only; video endpoints remain public and unowned.
+All chat and chat-audio routes use `get_current_user()` from `backend/app/api/dependencies.py`. The username comes only from the authenticated session; request bodies cannot select an owner. Store lookups are always rooted in that username's directory, so foreign and missing chat IDs have the same `404` response. Audio retrieval additionally requires an assistant message with a valid saved reference; it resolves only a validated answer ID under the configured answer-audio directory. Invalid IDs receive `422`, and malformed stored JSON fails closed with `503` without exposing filesystem paths. This ownership applies to chats only; video endpoints remain public and unowned.
 
 ### Persistent history versus LLM context
 

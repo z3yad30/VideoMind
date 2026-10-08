@@ -280,6 +280,12 @@ html[data-theme="solarized-light"] .toast.error { color: #fff; }
 .message-meta { display: flex; align-items: baseline; gap: 10px; min-height: 19px; margin-bottom: 6px; }
 .message-meta strong { color: var(--text); font-size: 11px; }
 .message-meta time { color: var(--subtle); font: 9px 'DM Mono', monospace; }
+.answer-audio-control { display: inline-flex; align-items: center; gap: 7px; margin-left: 1px; }
+.answer-audio-button { display: grid; flex: 0 0 26px; place-items: center; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; color: var(--accent); background: transparent; font-size: 14px; line-height: 1; }
+.answer-audio-button:hover:not(:disabled), .answer-audio-button.is-playing { border-color: var(--border); background: var(--surface-raised); }
+.answer-audio-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.answer-audio-button .loading-spinner { width: 13px; height: 13px; }
+.answer-audio-error { color: var(--danger); font: 9px 'DM Mono', monospace; }
 .message-user-text { display: inline-block; max-width: min(100%, 700px); margin: 0; padding: 10px 13px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border); font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .message-markdown { color: var(--text); font-size: 12px; line-height: 1.75; overflow-wrap: anywhere; }
 .message-markdown > :first-child { margin-top: 0; }

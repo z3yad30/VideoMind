@@ -1,5 +1,10 @@
+import asyncio
+import re
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 
 from backend.app.api.dependencies import get_current_user
 from backend.app.api.videos import ai_service, video_service, voice_service
@@ -23,6 +28,48 @@ from backend.app.services.chat_storage import (
 
 
 router = APIRouter(prefix="/chats", tags=["chats"])
+_ANSWER_AUDIO_ID = re.compile(r"^[0-9a-f]{32}$")
+_AUDIO_GENERATION_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
+
+
+def _chat_audio_location(chat_id: str, message_id: str, answer_id: str) -> str:
+    return f"/chats/{chat_id}/messages/{message_id}/audio/{answer_id}"
+
+
+def _message_answer_id(chat_id: str, message_id: str, audio_ref: str | None) -> str | None:
+    if not audio_ref:
+        return None
+    prefix = f"/chats/{chat_id}/messages/{message_id}/audio/"
+    if audio_ref.startswith(prefix):
+        answer_id = audio_ref[len(prefix):]
+        return answer_id if _ANSWER_AUDIO_ID.fullmatch(answer_id) else None
+    return None
+
+
+def _answer_audio_path(video_id: str, answer_id: str) -> Path | None:
+    if not re.fullmatch(r"[0-9a-f]{32}", video_id) or not _ANSWER_AUDIO_ID.fullmatch(answer_id):
+        return None
+    audio_root = voice_service.audio_dir
+    video_audio_dir = audio_root / video_id
+    audio_path = video_audio_dir / f"{answer_id}.wav"
+    if audio_root.is_symlink() or video_audio_dir.is_symlink() or audio_path.is_symlink():
+        return None
+    try:
+        audio_path.resolve().relative_to(audio_root.resolve())
+    except (OSError, ValueError):
+        return None
+    return audio_path
+
+
+def _owned_message(chat_id: str, message_id: str, username: str):
+    try:
+        chat = chat_store.get(username, chat_id)
+    except (ChatNotFoundError, ChatStoreError, InvalidChatIdError) as exc:
+        _raise_storage_error(exc)
+    message = next((item for item in chat.messages if item.id == message_id and item.role == "assistant"), None)
+    if message is None:
+        raise HTTPException(status_code=404, detail="Answer audio not found")
+    return chat, message
 
 
 def _raise_storage_error(error: Exception) -> None:
@@ -93,20 +140,19 @@ async def ask_in_chat(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     sources = [ChatSource.model_validate(source) for source in result["sources"]]
-    audio_location = None
-    try:
-        answer_id, _ = await run_in_threadpool(voice_service.synthesize_answer, chat.video_id, str(result["answer"]))
-        audio_location = f"/videos/{chat.video_id}/answers/{answer_id}/audio"
-    except RuntimeError:
-        pass
-
     assistant_message = ChatMessage(
         role="assistant",
         content=str(result["answer"]),
         sources=sources,
         timestamps=list(dict.fromkeys(time for source in sources for time in (source.start, source.end))),
-        answer_audio_ref=audio_location,
     )
+    audio_location = None
+    try:
+        answer_id, _ = await run_in_threadpool(voice_service.synthesize_answer, chat.video_id, str(result["answer"]))
+        audio_location = _chat_audio_location(chat_id, assistant_message.id, answer_id)
+        assistant_message = assistant_message.model_copy(update={"answer_audio_ref": audio_location})
+    except RuntimeError:
+        pass
     try:
         chat_store.append_message(user.username, chat_id, assistant_message)
     except (ChatNotFoundError, ChatStoreError, InvalidChatIdError) as exc:
@@ -118,6 +164,72 @@ async def ask_in_chat(
         sources=sources,
         answer_audio_location=audio_location,
     )
+
+
+@router.post("/{chat_id}/messages/{message_id}/audio")
+async def generate_chat_answer_audio(
+    chat_id: str,
+    message_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, str]:
+    chat, message = _owned_message(chat_id, message_id, user.username)
+    lock_key = (user.username, chat_id, message_id)
+    lock = _AUDIO_GENERATION_LOCKS.setdefault(lock_key, asyncio.Lock())
+    async with lock:
+        chat, message = _owned_message(chat_id, message_id, user.username)
+        answer_id = _message_answer_id(chat_id, message_id, message.answer_audio_ref)
+        if answer_id:
+            audio_path = _answer_audio_path(str(chat.video_id), answer_id)
+            if audio_path and audio_path.is_file():
+                return {"answer_audio_ref": message.answer_audio_ref or ""}
+        if not chat.video_id or not re.fullmatch(r"[0-9a-f]{32}", chat.video_id):
+            raise HTTPException(status_code=404, detail="Answer audio not found")
+        job = video_service.get_job(chat.video_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Video not found")
+        if job.status != "completed":
+            raise HTTPException(status_code=409, detail="Video processing is not complete")
+        try:
+            answer_id, audio_path = await run_in_threadpool(
+                voice_service.synthesize_answer, chat.video_id, message.content
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        expected_path = _answer_audio_path(chat.video_id, answer_id)
+        if expected_path is None or not audio_path.is_file() or audio_path.is_symlink():
+            raise HTTPException(status_code=503, detail="TTS did not produce an audio file")
+        try:
+            if audio_path.resolve() != expected_path.resolve():
+                raise HTTPException(status_code=503, detail="TTS produced an invalid audio location")
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail="TTS did not produce an audio file") from exc
+        audio_ref = _chat_audio_location(chat_id, message_id, answer_id)
+        try:
+            saved_message = chat_store.set_message_audio_ref(user.username, chat_id, message_id, audio_ref)
+        except (ChatNotFoundError, ChatStoreError, InvalidChatIdError) as exc:
+            _raise_storage_error(exc)
+        if saved_message is None:
+            raise HTTPException(status_code=404, detail="Answer audio not found")
+        return {"answer_audio_ref": audio_ref}
+
+
+@router.get("/{chat_id}/messages/{message_id}/audio")
+def get_chat_answer_audio(
+    chat_id: str,
+    message_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> FileResponse:
+    chat, message = _owned_message(chat_id, message_id, user.username)
+    answer_id = _message_answer_id(chat_id, message_id, message.answer_audio_ref)
+    if not answer_id or not chat.video_id or not re.fullmatch(r"[0-9a-f]{32}", chat.video_id):
+        raise HTTPException(status_code=404, detail="Answer audio not found")
+    job = video_service.get_job(chat.video_id)
+    if job is None or job.status != "completed":
+        raise HTTPException(status_code=404, detail="Answer audio not found")
+    audio_path = _answer_audio_path(chat.video_id, answer_id)
+    if audio_path is None or not audio_path.is_file():
+        raise HTTPException(status_code=404, detail="Answer audio not found")
+    return FileResponse(audio_path, media_type="audio/wav", filename=f"{answer_id}.wav")
 
 
 @router.get("/{chat_id}", response_model=ChatRecord)

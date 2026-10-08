@@ -127,6 +127,8 @@ Chat API (all endpoints require the HTTP-only authenticated session cookie):
 - `GET /chats` lists the current user's chats, newest activity first.
 - `POST /chats` creates a chat and returns its generated `chat_id`.
 - `POST /chats/{chat_id}/messages` accepts `{"question": "Explain this concept"}` and returns the saved `user_message`, generated `assistant_message`, its `sources`, and optional `answer_audio_location`.
+- `POST /chats/{chat_id}/messages/{message_id}/audio` idempotently generates missing answer audio using the existing voice service and persists the scoped reference.
+- `GET /chats/{chat_id}/messages/{message_id}/audio` streams the saved WAV only to the authenticated owner of that chat message.
 - `GET /chats/{chat_id}` returns one owned chat and resolves available video context.
 - `PUT /chats/{chat_id}` updates chat metadata/content, including the complete message list when supplied.
 - `DELETE /chats/{chat_id}` deletes an owned chat and returns `204`.
@@ -135,7 +137,11 @@ Chat API (all endpoints require the HTTP-only authenticated session cookie):
 
 `POST /chats/{chat_id}/messages` requires an authenticated owner and a chat associated with a video whose processing job is complete. The endpoint saves the user message first, then calls the same `VideoAIService.answer_question(video_id, question)` pipeline used by standalone video Q&A. Retrieval remains restricted to that video's Chroma collection and keeps the configured similarity thresholds and question-focused raw transcript fallback. A missing video returns `404`; a chat without a video returns `400`, and an unfinished video returns `409`.
 
-The assistant reply is saved with its text, source excerpts and start/end times, a timestamp list, creation time, and an answer-audio reference when TTS succeeds. Answer audio uses the existing `VoiceQuestionService` TTS adapter and `GET /videos/{video_id}/answers/{answer_id}/audio` route. If TTS is unavailable, the text answer is still returned and persisted without an audio reference. The response includes both saved messages and the source list.
+The assistant reply is saved with its text, source excerpts and start/end times, a timestamp list, creation time, and an answer-audio reference when TTS succeeds. Answer audio uses the existing `VoiceQuestionService` TTS adapter. If TTS is unavailable, the text answer is still returned and persisted without an audio reference. The response includes both saved messages and the source list.
+
+Every assistant answer has its own sound control. Audio generated with the answer is played only after the user clicks; the browser does not autoplay. The control shows a loading spinner while audio is generated or fetched, changes to a pause state during playback, and reports failures with a retry action. Repeated clicks while a request is pending are ignored, and the backend serializes generation per chat message. If eager synthesis failed or a saved answer has no audio reference, the control retries through `POST /chats/{chat_id}/messages/{message_id}/audio`, which calls the same `VoiceQuestionService.synthesize_answer` implementation. Playback uses `GET /chats/{chat_id}/messages/{message_id}/audio`; this route requires the authenticated chat owner and verifies the assistant message's saved reference. The existing `GET /videos/{video_id}/answers/{answer_id}/audio` route remains available for the voice-question workflow.
+
+Chat message JSON stores only an audio URL/reference, never WAV bytes. New chat-answer references are scoped to the owning chat and message (`/chats/{chat_id}/messages/{message_id}/audio/{answer_id}`); the WAV stays under `data/audio/answers/{video_id}/{answer_id}.wav`. Thus reopening a chat restores the reference, and playback remains owner-checked. The frontend fetches the protected endpoint with the session cookie and keeps only a temporary browser object URL for playback.
 
 In the chat, each assistant reply's **Relevant transcript / Sources** section starts collapsed to keep the conversation compact. Its keyboard-accessible expand button reveals transcript excerpts and start/end timestamps; each timestamp seeks playback to that point. Expand/collapse state is independent for every reply. This changes only source presentation, not retrieval or answer generation.
 
