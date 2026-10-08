@@ -71,6 +71,12 @@ The default theme is **Dark Modern**; **Solarized Light** is also available and 
 
 API calls include browser credentials. In-flight duplicate GETs are coalesced, and the request cache is invalidated at login/logout and protected-session expiry. Chat loads use a request sequence so late responses cannot replace a newer selection; switching chats clears the prior video context immediately.
 
+The workspace also enforces a visible chat/video mismatch guard. If a selected chat is associated with a different `video_id` than the currently active context, the composer is disabled and a warning is shown until the user loads that chat's own video context. This prevents a confusing ask against the wrong video while still keeping the backend authorization checks as the final authority.
+
+Chat deletion is exposed in the left-hand list as an explicit trash action. Selecting it opens a confirmation modal and then sends `DELETE /chats/{chat_id}` using the current authenticated session. The UI refreshes immediately and removes the deleted chat from the active workspace state.
+
+The summary panel includes a dedicated summary-audio control. Clicking it fetches `GET /videos/{video_id}/summary/audio`, plays the generated audio with a browser `Audio` object, and exposes a pause or retry state while keeping the control explicit rather than autoplaying on load.
+
 ## Runtime Data and Vanish
 
 Runtime data is below `data/`: `videos/` (including `.owners.json`), `audio/`, `transcripts/`, `summaries/`, `chroma/`, `users/`, and `chats/`. `python scripts/vanish.py` removes contents only from these seven allowlisted directories and recreates/retains their directories. It preserves source code, configuration, dependencies, `.git`, project caches outside the allowlist, and any unlisted content directly under `data/`.

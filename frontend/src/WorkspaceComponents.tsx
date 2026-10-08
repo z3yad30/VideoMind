@@ -1,12 +1,12 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ApiError, fetchChatAnswerAudio, generateChatAnswerAudio, type ChatListItem, type ChatMessage, type ProcessingEvent, type ProcessingStage, type Summary, type TranscriptSegment } from "./api";
+import { ApiError, fetchChatAnswerAudio, fetchSummaryAudio, generateChatAnswerAudio, type ChatListItem, type ChatMessage, type ProcessingEvent, type ProcessingStage, type Summary, type TranscriptSegment } from "./api";
 import { formatTime, resolveMediaUrl } from "./api";
 
 export type WorkspaceView = "chat" | "new-video" | "summary" | "video" | "transcript";
 
-export function ChatSidebar({ username, chats, selectedChatId, activeView, videoReady, isLoadingChats, isOpen, onClose, onView, onNewChat, onSelectChat, onLogout, themeToggle }: {
+export function ChatSidebar({ username, chats, selectedChatId, activeView, videoReady, isLoadingChats, isOpen, onClose, onView, onNewChat, onSelectChat, onDeleteChat, onLogout, themeToggle }: {
   username: string;
   chats: ChatListItem[];
   selectedChatId: string | null;
@@ -18,6 +18,7 @@ export function ChatSidebar({ username, chats, selectedChatId, activeView, video
   onView: (view: WorkspaceView) => void;
   onNewChat: () => void;
   onSelectChat: (chatId: string) => void;
+  onDeleteChat: (chatId: string) => void;
   onLogout: () => void;
   themeToggle: ReactNode;
 }) {
@@ -42,10 +43,13 @@ export function ChatSidebar({ username, chats, selectedChatId, activeView, video
       </nav>
       <div className="sidebar-history-heading"><span className="sidebar-section-label">Your chats</span>{isLoadingChats && <span className="sidebar-loading" role="status">Loading</span>}</div>
       <nav className="chat-history" aria-label="Existing chats">
-        {chats.map((chat) => <button type="button" key={chat.chat_id} className={`chat-history-item ${selectedChatId === chat.chat_id ? "active" : ""}`} onClick={() => { onSelectChat(chat.chat_id); onClose(); }} title={chat.title}>
-          <span className="chat-history-title">{chat.title || "New conversation"}</span>
-          <time dateTime={chat.updated_at}>{new Date(chat.updated_at).toLocaleDateString([], { month: "short", day: "numeric" })}</time>
-        </button>)}
+        {chats.map((chat) => <div key={chat.chat_id} className={`chat-history-entry ${selectedChatId === chat.chat_id ? "active" : ""}`}>
+          <button type="button" className="chat-history-item" onClick={() => { onSelectChat(chat.chat_id); onClose(); }} title={chat.title}>
+            <span className="chat-history-title">{chat.title || "New conversation"}</span>
+            <time dateTime={chat.updated_at}>{new Date(chat.updated_at).toLocaleDateString([], { month: "short", day: "numeric" })}</time>
+          </button>
+          <button type="button" className="chat-delete-button" onClick={(event) => { event.stopPropagation(); onDeleteChat(chat.chat_id); }} aria-label={`Delete ${chat.title || "chat"}`} title="Delete chat">🗑</button>
+        </div>)}
         {!isLoadingChats && chats.length === 0 && <p className="sidebar-empty">Your saved conversations will appear here.</p>}
       </nav>
       <footer className="sidebar-footer"><div className="sidebar-user"><span className="user-avatar">{username.slice(0, 1).toUpperCase()}</span><span title={username}>{username}</span></div><div className="sidebar-footer-actions">{themeToggle}<button className="logout-button" type="button" onClick={onLogout} title="Log out" aria-label="Log out">↪</button></div></footer>
@@ -53,7 +57,7 @@ export function ChatSidebar({ username, chats, selectedChatId, activeView, video
   </>;
 }
 
-export function ChatWindow({ chatId, chatTitle, messages, hasVideo, videoReady, isLoading, isAsking, question, onQuestionChange, onSubmit, onMenu, onJump, onAudioRef }: {
+export function ChatWindow({ chatId, chatTitle, messages, hasVideo, videoReady, isLoading, isAsking, question, chatMismatch, mismatchMessage, onQuestionChange, onSubmit, onMenu, onJump, onAudioRef, onLoadVideoContext }: {
   chatId: string | null;
   chatTitle: string;
   messages: ChatMessage[];
@@ -62,11 +66,14 @@ export function ChatWindow({ chatId, chatTitle, messages, hasVideo, videoReady, 
   isLoading: boolean;
   isAsking: boolean;
   question: string;
+  chatMismatch: boolean;
+  mismatchMessage: string;
   onQuestionChange: (value: string) => void;
   onSubmit: () => void;
   onMenu: () => void;
   onJump: (seconds: number) => void;
   onAudioRef: (messageId: string, audioRef: string) => void;
+  onLoadVideoContext: () => void;
 }) {
   const feedRef = useRef<HTMLDivElement>(null);
   const submit = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); onSubmit(); };
@@ -85,11 +92,16 @@ export function ChatWindow({ chatId, chatTitle, messages, hasVideo, videoReady, 
     <header className="chat-header"><button className="mobile-menu-button" type="button" onClick={onMenu} aria-label="Open navigation">☰</button><div className="chat-header-title"><span className="chat-header-kicker">VideoMind conversation</span><h1>{chatTitle || "New conversation"}</h1></div><span className={`chat-context-status ${videoReady ? "ready" : ""}`}>{videoReady ? "Video ready" : hasVideo ? "Processing" : "No video"}</span></header>
     <div className="chat-feed" ref={feedRef} aria-live="polite">
       {isLoading && <div className="chat-state"><span className="loading-spinner" />Loading conversation...</div>}
-      {!isLoading && messages.length === 0 && <div className="chat-welcome"><span className="welcome-mark">V</span><h2>{hasVideo ? "What would you like to know?" : "Start with a video"}</h2><p>{hasVideo ? "Ask a question about the selected video. Your conversation will be saved here." : "Choose New video to process a source, or open one of your saved conversations."}</p></div>}
+      {!isLoading && messages.length === 0 && <div className="chat-welcome"><span className="welcome-mark">V</span><h2>{hasVideo ? "What would you like to know?" : "Select a chat to continue"}</h2><p>{hasVideo ? "Ask a question about the selected video. Your conversation will be saved here." : "Select a saved chat or create a new chat for your current video."}</p></div>}
       {!isLoading && [...messages].sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)).map((message) => <ChatMessage key={message.id} chatId={chatId} message={message} onJump={onJump} canJump={videoReady} onAudioRef={onAudioRef} />)}
       {isAsking && <div className="assistant-pending"><span className="loading-spinner" /><span>Thinking through the video...</span></div>}
     </div>
-    <form className="chat-composer" onSubmit={submit}>{!videoReady && <p className="composer-note">{hasVideo ? "Questions will be available when video processing finishes." : "Select or process a video before asking questions."}</p>}<div className="composer-box"><textarea aria-label="Message" placeholder={videoReady ? "Ask anything about this video..." : "Ask about your video"} rows={1} value={question} onChange={(event) => onQuestionChange(event.target.value)} onKeyDown={submitOnEnter} disabled={!videoReady || isAsking || isLoading} /><button type="submit" className="send-button" aria-label={isAsking ? "Sending message" : "Send message"} disabled={!videoReady || !question.trim() || isAsking || isLoading}>{isAsking ? <span className="send-pulse">···</span> : "↑"}</button></div><span className="composer-hint">Enter to send · Shift + Enter for a new line</span></form>
+    <form className="chat-composer" onSubmit={submit}>
+      {chatMismatch && <div className="composer-warning" role="alert"><strong>⚠ This chat belongs to another video.</strong><span>{mismatchMessage}</span><button type="button" className="composer-link" onClick={onLoadVideoContext}>Load this video’s context</button></div>}
+      {!videoReady && !chatMismatch && <p className="composer-note">{hasVideo ? "Questions will be available when video processing finishes." : "Select or process a video before asking questions."}</p>}
+      <div className="composer-box"><textarea aria-label="Message" placeholder={videoReady ? "Ask anything about this video..." : "Ask about your video"} rows={1} value={question} onChange={(event) => onQuestionChange(event.target.value)} onKeyDown={submitOnEnter} disabled={!videoReady || chatMismatch || isAsking || isLoading} /><button type="submit" className="send-button" aria-label={isAsking ? "Sending message" : "Send message"} disabled={!videoReady || chatMismatch || !question.trim() || isAsking || isLoading}>{isAsking ? <span className="send-pulse">···</span> : "↑"}</button></div>
+      <span className="composer-hint">Enter to send · Shift + Enter for a new line</span>
+    </form>
   </section>;
 }
 
@@ -201,8 +213,72 @@ export function ProcessingPanel({ status, stages, activity }: { status: string; 
   return <section className="workspace-panel processing-panel"><div className="workspace-panel-heading"><span className="chat-header-kicker">Video processing</span><h1>{failed ? "Processing needs attention" : status === "completed" ? "Your video is ready" : "Building your video workspace"}</h1><p>{failed ? "The source could not be processed. Choose another source to try again." : status === "completed" ? "Opening a chat for this video..." : "VideoMind is preparing a transcript and summary."}</p></div><div className="processing-list">{stages.map((stage) => <div className={`processing-list-item ${stage.status}`} key={stage.id}><span aria-hidden="true">{stage.status === "completed" || stage.status === "skipped" ? "✓" : stage.status === "running" ? "◉" : stage.status === "failed" ? "×" : "○"}</span><strong>{stage.display_name}</strong>{stage.progress !== null && <time>{stage.progress}%</time>}</div>)}</div>{activity.length > 0 && <p className="processing-latest">{activity[activity.length - 1].message || activity[activity.length - 1].event.replaceAll("_", " ")}</p>}</section>;
 }
 
-export function SummaryPanel({ summary }: { summary: Summary | null }) {
-  return <section className="workspace-panel context-panel"><div className="workspace-panel-heading"><span className="chat-header-kicker">Current video</span><h1>Summary</h1><p>A structured overview of the selected video.</p></div>{summary ? <div className="context-summary">{Object.entries(summary).map(([key, value]) => <section key={key}><span>{key.replaceAll("_", " ")}</span><p>{value}</p></section>)}</div> : <div className="context-empty">Summary is not available for this video yet.</div>}</section>;
+function SummaryAudioButton({ videoId }: { videoId: string | null }) {
+  const [playback, setPlayback] = useState<"idle" | "loading" | "playing" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    setPlayback("idle");
+    setError(null);
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+    }
+  }, [videoId]);
+
+  useEffect(() => () => {
+    audioRef.current?.pause();
+    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+  }, []);
+
+  const togglePlayback = async () => {
+    if (!videoId) return;
+    if (playback === "playing" && audioRef.current) {
+      audioRef.current.pause();
+      setPlayback("idle");
+      return;
+    }
+    setPlayback("loading");
+    setError(null);
+    try {
+      const blob = await fetchSummaryAudio(videoId);
+      const objectUrl = URL.createObjectURL(blob);
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = objectUrl;
+      const audio = new Audio(objectUrl);
+      audio.onended = () => setPlayback("idle");
+      audio.onpause = () => setPlayback("idle");
+      audio.onerror = () => {
+        setPlayback("error");
+        setError("Summary audio is unavailable.");
+      };
+      audioRef.current = audio;
+      await audio.play();
+      setPlayback("playing");
+    } catch (caught) {
+      setPlayback("error");
+      setError(caught instanceof Error ? caught.message : "Summary audio is unavailable.");
+      audioRef.current?.pause();
+      audioRef.current = null;
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+    }
+  };
+
+  const label = playback === "loading" ? "Generating summary audio" : playback === "playing" ? "Pause summary audio" : playback === "error" ? "Retry summary audio" : "Play summary audio";
+  return <div className="summary-audio-control"><button className="summary-audio-button" type="button" disabled={!videoId || playback === "loading"} onClick={() => void togglePlayback()} aria-label={label}>{playback === "loading" ? "⏳ Generating..." : playback === "playing" ? "⏸ Pause" : "▶ Play Summary"}</button>{error && <span className="summary-audio-error" role="status">{error}</span>}</div>;
+}
+
+export function SummaryPanel({ summary, videoId }: { summary: Summary | null; videoId: string | null }) {
+  return <section className="workspace-panel context-panel"><div className="workspace-panel-heading"><span className="chat-header-kicker">Current video</span><h1>Summary</h1><p>A structured overview of the selected video.</p></div>{summary ? <div className="context-summary"><SummaryAudioButton videoId={videoId} />{Object.entries(summary).map(([key, value]) => <section key={key}><span>{key.replaceAll("_", " ")}</span><p>{value}</p></section>)}</div> : <div className="context-empty">Summary is not available for this video yet.</div>}</section>;
 }
 
 export function VideoPanel({ videoId, videoRef, ready }: { videoId: string | null; videoRef: RefObject<HTMLVideoElement | null>; ready: boolean }) {

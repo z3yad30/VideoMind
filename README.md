@@ -175,6 +175,14 @@ Selecting a saved chat loads its full chronological message history and video ID
 
 **New video** opens the existing upload or YouTube ingestion workflow. When processing completes, the frontend creates and opens a chat associated with the resulting video ID. **New chat** creates an empty chat linked to the currently selected, already-processed video; it does not upload or download that video again. The Summary, Video, and Transcript sidebar views use the context restored for the selected chat.
 
+### Current chat/video safeguards and controls
+
+The workspace validates the selected chat against the active video context before the composer allows a new answer. If the chat belongs to a different video, the UI shows a mismatch warning, disables the question composer, and exposes a direct action to load the selected chat's own video context before continuing. This is a frontend guardrail; the backend still enforces ownership and rejects non-matching video/chat combinations.
+
+Each chat row also includes a delete control. Clicking it opens a confirmation dialog and then calls the authenticated `DELETE /chats/{chat_id}` route to remove the chat and its persisted messages. The selected chat is cleared from the UI immediately after deletion, and the sidebar refreshes.
+
+The summary panel includes an explicit **Play Summary** control. It calls the authenticated summary-audio route, creates a temporary browser audio object, and enables a pause/retry flow without auto-playing on load. This remains scoped to the current video's canonical summary output and respects the existing owner checks.
+
 Frontend responsibilities are split across `frontend/src/App.tsx` for authentication, `frontend/src/VideoChatWorkspace.tsx` for workspace state and API orchestration, `frontend/src/WorkspaceComponents.tsx` for the sidebar, chat messages/composer, ingestion and context panels, `frontend/src/api.ts` for typed HTTP calls, and `frontend/src/styles.css` for responsive layout and themes.
 
 ## Runtime Data Reset: Vanish

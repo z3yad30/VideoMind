@@ -202,6 +202,28 @@ export function getSummary(videoId: string) {
   return request<{ video_id: string; summary: Summary }>(`/videos/${videoId}/summary`);
 }
 
+export async function fetchSummaryAudio(videoId: string) {
+  const path = `/videos/${videoId}/summary/audio`;
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(path), { credentials: "include" });
+  } catch {
+    throw new Error("Can't reach the VideoMind server. Check that the backend is running and try again.");
+  }
+  if (response.status === 401) onSessionExpired?.();
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
+    try {
+      const body = await response.json();
+      if (typeof body.detail === "string") message = body.detail;
+    } catch {
+      // Keep the HTTP status message when the server did not return JSON.
+    }
+    throw new ApiError(message, response.status);
+  }
+  return response.blob();
+}
+
 export function listChats() {
   return request<ChatListItem[]>("/chats");
 }
@@ -216,6 +238,10 @@ export function createChat(videoId?: string) {
 
 export function getChat(chatId: string) {
   return request<ChatRecord>(`/chats/${chatId}`);
+}
+
+export function deleteChat(chatId: string) {
+  return request<void>(`/chats/${chatId}`, { method: "DELETE" });
 }
 
 export function askChatQuestion(chatId: string, question: string) {

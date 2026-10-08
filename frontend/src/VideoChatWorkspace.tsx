@@ -3,6 +3,7 @@ import {
   ApiError,
   askChatQuestion,
   createChat,
+  deleteChat,
   eventsUrl,
   getChat,
   getStatus,
@@ -44,6 +45,7 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [selectedChat, setSelectedChat] = useState<ChatRecord | null>(null);
   const [videoId, setVideoId] = useState<string | null>(null);
+  const [chatToDelete, setChatToDelete] = useState<ChatListItem | null>(null);
   const [status, setStatus] = useState<VideoStatus | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [transcript, setTranscript] = useState<TranscriptSegment[]>([]);
@@ -68,6 +70,7 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
 
   const videoReady = status?.status === "completed" || Boolean(videoId && summary && transcript.length > 0);
   const isProcessing = Boolean(status && status.status !== "completed" && status.status !== "failed");
+  const chatVideoMismatch = Boolean(selectedChat && ((selectedChat.video_id && videoId && selectedChat.video_id !== videoId) || (!selectedChat.video_id && Boolean(videoId)) || (selectedChat.video_id && !videoId)));
 
   const refreshChats = async () => {
     const latest = await listChats();
@@ -75,16 +78,42 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
     return latest;
   };
 
-  const loadChat = async (chatId: string) => {
-    const sequence = ++loadSequenceRef.current;
-    setSelectedChatId(chatId);
-    setSelectedChat(null);
-    setVideoId(null);
+  const loadActiveVideo = async (nextVideoId: string | null) => {
+    if (!nextVideoId) {
+      setVideoId(null);
+      setStatus(null);
+      setSummary(null);
+      setTranscript([]);
+      setStages([]);
+      setActivity([]);
+      return;
+    }
+    setVideoId(nextVideoId);
     setStatus(null);
     setSummary(null);
     setTranscript([]);
     setStages([]);
     setActivity([]);
+    try {
+      const videoStatus = await getStatus(nextVideoId);
+      setStatus(videoStatus);
+      setStages(videoStatus.stages || []);
+      if (videoStatus.status === "completed") {
+        const [transcriptResult, summaryResult] = await Promise.allSettled([getTranscript(nextVideoId), getSummary(nextVideoId)]);
+        if (transcriptResult.status === "fulfilled") setTranscript(transcriptResult.value.segments);
+        if (summaryResult.status === "fulfilled") setSummary(summaryResult.value.summary);
+      }
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 404)) {
+        setNotice({ kind: "error", message: error instanceof Error ? error.message : "Could not read video status." });
+      }
+    }
+  };
+
+  const loadChat = async (chatId: string) => {
+    const sequence = ++loadSequenceRef.current;
+    setSelectedChatId(chatId);
+    setSelectedChat(null);
     setLoadingChat(true);
     setNotice(null);
     setActiveView("chat");
@@ -93,28 +122,32 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
       const chat = await getChat(chatId);
       if (sequence !== loadSequenceRef.current) return;
       setSelectedChat(chat);
-      setVideoId(chat.video_id);
-      setSummary(chat.summary);
-      setTranscript(chat.transcript?.segments || []);
-      setStatus(null);
-      setStages([]);
-      setActivity([]);
-      if (chat.video_id) {
-        try {
-          const videoStatus = await getStatus(chat.video_id);
-          if (sequence === loadSequenceRef.current) {
-            setStatus(videoStatus);
-            setStages(videoStatus.stages || []);
-            if (videoStatus.status === "completed") {
-              const [transcriptResult, summaryResult] = await Promise.allSettled([getTranscript(chat.video_id), getSummary(chat.video_id)]);
-              if (sequence !== loadSequenceRef.current) return;
-              if (transcriptResult.status === "fulfilled") setTranscript(transcriptResult.value.segments);
-              if (summaryResult.status === "fulfilled") setSummary(summaryResult.value.summary);
+      const matchesActiveVideo = Boolean(chat.video_id && videoId && chat.video_id === videoId);
+      const hasNoActiveVideo = !videoId && !chat.video_id;
+      if (matchesActiveVideo || hasNoActiveVideo) {
+        setVideoId(chat.video_id || null);
+        setSummary(chat.summary);
+        setTranscript(chat.transcript?.segments || []);
+        setStatus(null);
+        setStages([]);
+        setActivity([]);
+        if (chat.video_id) {
+          try {
+            const videoStatus = await getStatus(chat.video_id);
+            if (sequence === loadSequenceRef.current) {
+              setStatus(videoStatus);
+              setStages(videoStatus.stages || []);
+              if (videoStatus.status === "completed") {
+                const [transcriptResult, summaryResult] = await Promise.allSettled([getTranscript(chat.video_id), getSummary(chat.video_id)]);
+                if (sequence !== loadSequenceRef.current) return;
+                if (transcriptResult.status === "fulfilled") setTranscript(transcriptResult.value.segments);
+                if (summaryResult.status === "fulfilled") setSummary(summaryResult.value.summary);
+              }
             }
-          }
-        } catch (error) {
-          if (sequence === loadSequenceRef.current && !(error instanceof ApiError && error.status === 404)) {
-            setNotice({ kind: "error", message: error instanceof Error ? error.message : "Could not read video status." });
+          } catch (error) {
+            if (sequence === loadSequenceRef.current && !(error instanceof ApiError && error.status === 404)) {
+              setNotice({ kind: "error", message: error instanceof Error ? error.message : "Could not read video status." });
+            }
           }
         }
       }
@@ -238,7 +271,7 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
   const ask = async () => {
     const currentQuestion = question.trim();
     const chatId = selectedChatId;
-    if (!chatId || !videoReady || !currentQuestion || askLockRef.current) return;
+    if (!chatId || chatVideoMismatch || !videoReady || !currentQuestion || askLockRef.current) return;
     askLockRef.current = true;
     setAsking(true);
     setNotice(null);
@@ -275,6 +308,25 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
     setActiveView("video");
   };
 
+  const handleDeleteChat = async (chatId: string) => {
+    const targetChat = chats.find((chat) => chat.chat_id === chatId);
+    if (!targetChat) return;
+    setChatToDelete(null);
+    try {
+      await deleteChat(chatId);
+      setChats((current) => current.filter((chat) => chat.chat_id !== chatId));
+      if (selectedChatId === chatId) {
+        setSelectedChatId(null);
+        setSelectedChat(null);
+        setQuestion("");
+      }
+      setNotice({ kind: "info", message: "Chat deleted." });
+      await refreshChats();
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : "Could not delete this chat." });
+    }
+  };
+
   const updateAnswerAudioRef = (messageId: string, audioRef: string) => {
     const chatId = selectedChatId;
     if (!chatId) return;
@@ -288,16 +340,20 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
 
   const themeToggle = <button className="theme-toggle" type="button" onClick={onThemeToggle} aria-label={`Current theme: ${theme}. Switch theme.`} title="Switch theme"><span aria-hidden="true">◐</span>{theme === "dark-modern" ? "Dark" : "Light"}</button>;
   const title = selectedChat?.title || (selectedChat?.video_id ? "Video conversation" : "New conversation");
+  const mismatchMessage = selectedChat?.video_id
+    ? `This chat belongs to another video. Load its video to continue chatting.`
+    : "This chat is not linked to a video. Select a processed video to continue chatting.";
 
   return <main className="chat-workspace">
-    <ChatSidebar username={username} chats={chats} selectedChatId={selectedChatId} activeView={activeView} videoReady={videoReady} isLoadingChats={isLoadingChats} isOpen={isSidebarOpen} onClose={() => setSidebarOpen(false)} onView={setActiveView} onNewChat={() => void startNewChat()} onSelectChat={(chatId) => void loadChat(chatId)} onLogout={onLogout} themeToggle={themeToggle} />
+    <ChatSidebar username={username} chats={chats} selectedChatId={selectedChatId} activeView={activeView} videoReady={videoReady} isLoadingChats={isLoadingChats} isOpen={isSidebarOpen} onClose={() => setSidebarOpen(false)} onView={setActiveView} onNewChat={() => void startNewChat()} onSelectChat={(chatId) => void loadChat(chatId)} onDeleteChat={(chatId) => setChatToDelete(chats.find((chat) => chat.chat_id === chatId) || null)} onLogout={onLogout} themeToggle={themeToggle} />
     <div className="chat-main">
-      {activeView === "chat" && <ChatWindow chatId={selectedChatId} chatTitle={title} messages={selectedChat?.messages || []} hasVideo={Boolean(videoId)} videoReady={videoReady} isLoading={isLoadingChat} isAsking={isAsking} question={question} onQuestionChange={setQuestion} onSubmit={() => void ask()} onMenu={() => setSidebarOpen(true)} onJump={jumpTo} onAudioRef={updateAnswerAudioRef} />}
+      {activeView === "chat" && <ChatWindow chatId={selectedChatId} chatTitle={title} messages={selectedChat?.messages || []} hasVideo={Boolean(videoId)} videoReady={videoReady} isLoading={isLoadingChat} isAsking={isAsking} question={question} chatMismatch={chatVideoMismatch} mismatchMessage={mismatchMessage} onQuestionChange={setQuestion} onSubmit={() => void ask()} onMenu={() => setSidebarOpen(true)} onJump={jumpTo} onAudioRef={updateAnswerAudioRef} onLoadVideoContext={() => selectedChat?.video_id ? void loadActiveVideo(selectedChat.video_id) : undefined} />}
       {activeView === "new-video" && isProcessing && <ProcessingPanel status={status?.status || "queued"} stages={stages} activity={activity} />}
       {activeView === "new-video" && !isProcessing && <NewVideoPanel fileName={file?.name || ""} sourceUrl={sourceUrl} isSubmitting={isSubmitting} onFile={(nextFile) => { setFile(nextFile); setSourceUrl(""); }} onUrlChange={(url) => { setSourceUrl(url); setFile(null); }} onStart={() => void startProcessing()} />}
-      {activeView === "summary" && <SummaryPanel summary={summary} />}
+      {activeView === "summary" && <SummaryPanel summary={summary} videoId={videoId} />}
       {activeView === "video" && <VideoPanel videoId={videoId} videoRef={videoRef} ready={videoReady} />}
       {activeView === "transcript" && <TranscriptPanel transcript={transcript} onJump={jumpTo} ready={videoReady} />}
+      {chatToDelete && <div className="delete-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-chat-title"><div className="delete-dialog"><h2 id="delete-chat-title">Delete this chat?</h2><p>This conversation will be permanently removed.</p><div className="delete-dialog-actions"><button type="button" className="secondary-button" onClick={() => setChatToDelete(null)}>Cancel</button><button type="button" className="danger-button" onClick={() => void handleDeleteChat(chatToDelete.chat_id)}>Delete</button></div></div></div>}
       {notice && <div className={`toast ${notice.kind}`} role="alert">{notice.message}<button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notification">×</button></div>}
     </div>
   </main>;
