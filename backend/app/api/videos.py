@@ -4,11 +4,12 @@ import mimetypes
 from pathlib import Path
 import re
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.app.core.config import settings
+from backend.app.api.dependencies import get_current_user
 from backend.app.schemas.videos import (
     QuestionRequest,
     QuestionResponse,
@@ -24,6 +25,8 @@ from backend.app.services.llm import VideoAIService
 from backend.app.services.media import MediaProcessingError, MediaService
 from backend.app.services.video_processing import VideoProcessingService
 from backend.app.services.voice import VoiceQuestionService
+from backend.app.services.auth import AuthenticatedUser
+from backend.app.services.video_storage import VideoOwnershipError, video_ownership
 
 router = APIRouter(prefix="/videos", tags=["videos"])
 media_service = MediaService()
@@ -32,6 +35,22 @@ video_service = VideoProcessingService(media=media_service, ai=ai_service)
 voice_service = VoiceQuestionService(ai=ai_service, media=media_service)
 _processing_tasks: set[asyncio.Task[None]] = set()
 _ARTIFACT_ID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _require_video_owner(video_id: str, user: AuthenticatedUser) -> None:
+    try:
+        owned = video_ownership.is_owned_by(video_id, user.username)
+    except VideoOwnershipError as exc:
+        raise HTTPException(status_code=503, detail="Video storage is unavailable") from exc
+    if not owned:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+
+def _register_video_owner(video_id: str, username: str) -> None:
+    try:
+        video_ownership.register(video_id, username)
+    except VideoOwnershipError as exc:
+        raise HTTPException(status_code=503, detail="Video storage is unavailable") from exc
 
 
 def _start_processing(video_id: str, media_path: Path, source_url: str | None = None) -> None:
@@ -52,12 +71,13 @@ def _resolve_source_media_path(video_id: str) -> Path:
 
 
 @router.post("/upload", response_model=VideoJobResponse, status_code=status.HTTP_202_ACCEPTED)
-async def upload_video(file: UploadFile = File(...)) -> VideoJobResponse:
+async def upload_video(file: UploadFile = File(...), user: AuthenticatedUser = Depends(get_current_user)) -> VideoJobResponse:
     try:
         suffix = media_service.validate_filename(file.filename)
         video_id = video_service.create_job()
         source_path = settings.project_root / "data" / "videos" / f"{video_id}{suffix}"
         media_service.save_upload(file, source_path)
+        _register_video_owner(video_id, user.username)
     except MediaProcessingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -67,14 +87,16 @@ async def upload_video(file: UploadFile = File(...)) -> VideoJobResponse:
 
 
 @router.post("/youtube", response_model=VideoJobResponse, status_code=status.HTTP_202_ACCEPTED)
-async def process_youtube(request: YouTubeRequest) -> VideoJobResponse:
+async def process_youtube(request: YouTubeRequest, user: AuthenticatedUser = Depends(get_current_user)) -> VideoJobResponse:
     video_id = video_service.create_job()
+    _register_video_owner(video_id, user.username)
     _start_processing(video_id, Path(), str(request.url))
     return VideoJobResponse(video_id=video_id, status="queued")
 
 
 @router.get("/{video_id}", response_model=VideoJobResponse)
-async def get_video(video_id: str) -> VideoJobResponse:
+async def get_video(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> VideoJobResponse:
+    _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -82,7 +104,8 @@ async def get_video(video_id: str) -> VideoJobResponse:
 
 
 @router.get("/{video_id}/status", response_model=VideoStatusResponse)
-async def get_video_status(video_id: str) -> VideoStatusResponse:
+async def get_video_status(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> VideoStatusResponse:
+    _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -90,7 +113,8 @@ async def get_video_status(video_id: str) -> VideoStatusResponse:
 
 
 @router.get("/{video_id}/events")
-async def video_events(video_id: str) -> StreamingResponse:
+async def video_events(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> StreamingResponse:
+    _require_video_owner(video_id, user)
     if video_service.get_job(video_id) is None:
         raise HTTPException(status_code=404, detail="Video not found")
 
@@ -111,7 +135,8 @@ async def video_events(video_id: str) -> StreamingResponse:
 
 
 @router.get("/{video_id}/transcript", response_model=TranscriptResponse)
-async def get_transcript(video_id: str) -> TranscriptResponse:
+async def get_transcript(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> TranscriptResponse:
+    _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -124,7 +149,8 @@ async def get_transcript(video_id: str) -> TranscriptResponse:
 
 
 @router.get("/{video_id}/summary", response_model=SummaryResponse)
-async def get_summary(video_id: str) -> SummaryResponse:
+async def get_summary(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> SummaryResponse:
+    _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -137,7 +163,8 @@ async def get_summary(video_id: str) -> SummaryResponse:
 
 
 @router.get("/{video_id}/summary/audio")
-async def get_summary_audio(video_id: str) -> FileResponse:
+async def get_summary_audio(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> FileResponse:
+    _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -152,7 +179,8 @@ async def get_summary_audio(video_id: str) -> FileResponse:
 
 
 @router.get("/{video_id}/media")
-async def get_video_media(video_id: str) -> FileResponse:
+async def get_video_media(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> FileResponse:
+    _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -164,7 +192,8 @@ async def get_video_media(video_id: str) -> FileResponse:
 
 
 @router.post("/{video_id}/question", response_model=QuestionResponse)
-async def ask_question(video_id: str, request: QuestionRequest) -> QuestionResponse:
+async def ask_question(video_id: str, request: QuestionRequest, user: AuthenticatedUser = Depends(get_current_user)) -> QuestionResponse:
+    _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -180,7 +209,8 @@ async def ask_question(video_id: str, request: QuestionRequest) -> QuestionRespo
 
 
 @router.post("/{video_id}/voice-question", response_model=VoiceQuestionResponse)
-async def ask_voice_question(video_id: str, file: UploadFile = File(...)) -> VoiceQuestionResponse:
+async def ask_voice_question(video_id: str, file: UploadFile = File(...), user: AuthenticatedUser = Depends(get_current_user)) -> VoiceQuestionResponse:
+    _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -203,7 +233,8 @@ async def ask_voice_question(video_id: str, file: UploadFile = File(...)) -> Voi
 
 
 @router.get("/{video_id}/answers/{answer_id}/audio")
-async def get_voice_answer_audio(video_id: str, answer_id: str) -> FileResponse:
+async def get_voice_answer_audio(video_id: str, answer_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> FileResponse:
+    _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None or job.status != "completed" or not _ARTIFACT_ID.fullmatch(video_id) or not _ARTIFACT_ID.fullmatch(answer_id):
         raise HTTPException(status_code=404, detail="Answer audio not found")

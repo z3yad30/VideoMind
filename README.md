@@ -9,7 +9,7 @@ The backend and Vite frontend are implemented. The application requires a userna
 The pipeline is:
 
 1. Upload a video/audio file or submit a YouTube URL.
-2. Persist the source under `data/videos/{video_id}{extension}` for both uploads and YouTube downloads.
+2. Persist the source under `data/videos/{video_id}{extension}` for both uploads and YouTube downloads, and record its authenticated owner in `data/videos/.owners.json`.
 3. Extract audio with FFmpeg in a temporary working directory.
 4. Transcribe audio with configurable `faster-whisper`.
 5. Persist timestamped transcript segments.
@@ -22,13 +22,13 @@ The pipeline is:
 
 The important behavior change is that YouTube downloads are no longer temporary: the saved source remains in `data/videos/` after processing completes and is served through the backend media route for playback.
 
-The backend uses FastAPI and Uvicorn. Route handlers remain thin; authentication, user storage, processing, ASR, media, embedding, vector-store, LLM, and TTS responsibilities live in separate modules.
+The backend uses FastAPI and Uvicorn. Route handlers remain thin; authentication, user and video-owner storage, chat storage, processing, ASR, media, embedding, vector-store, LLM, and TTS responsibilities live in separate modules.
 
 ## Technologies
 
 - Python 3.13 is currently available on the development machine.
 - FastAPI and Uvicorn for the API.
-- `faster-whisper` for configurable ASR, defaulting to `large-v3`.
+- `faster-whisper` for configurable ASR, defaulting to `base`.
 - FFmpeg for audio extraction and conversion.
 - `yt-dlp` for authorized YouTube retrieval.
 - Sentence Transformers for local embeddings, defaulting to `BAAI/bge-m3`.
@@ -41,7 +41,7 @@ The backend uses FastAPI and Uvicorn. Route handlers remain thin; authentication
 ```text
 backend/app/       API, services, models, schemas, core, utilities, database
 frontend/           React/Vite application with login, registration, and video workspace
-data/               Local runtime media, transcript, summary, Chroma, chat, and user storage
+data/               Local runtime media, video-owner index, transcript, summary, Chroma, chat, and user storage
 tests/              Unit and integration tests
 .venv/              Project-root Python virtual environment
 requirements.txt    Runtime and test dependencies
@@ -114,13 +114,15 @@ The frontend opens on a login screen and offers account registration. Registrati
 
 On startup, the frontend calls `GET /auth/me` and only mounts the VideoMind workspace when a valid session is returned. Login sets an HTTP-only, SameSite=Lax session cookie that the browser attaches to subsequent API requests, including after a page refresh. Sessions are random server-side identifiers and expire after 12 hours. Session state is in memory, so restarting the backend invalidates all sessions. A protected API `401` returns the frontend to login, and logout calls `POST /auth/logout` to invalidate the session and clear the cookie.
 
-Chat routes require this authenticated session and chats are isolated by owner. The frontend prevents unauthenticated access to the workspace, but video routes are still public at the backend and videos are not account-owned. The cookie is configured for local HTTP rather than HTTPS. Do not expose this service to the public internet as-is.
+Chat and video routes require this authenticated session. Uploaded and YouTube-processed videos are assigned to the authenticated account; ownership is stored in `data/videos/.owners.json`. Video status, SSE events, media, transcript, summary, voice answers, and Q&A all check ownership. Chats can only reference videos owned by the current user. Chat answer audio is separately checked against the owning chat and assistant message. Unknown and foreign resource IDs return `404`.
+
+The browser session survives page refreshes through the HTTP-only cookie, but session records are in memory and are invalidated when the backend restarts; the cookie expires after 12 hours. The cookie is configured for local HTTP rather than HTTPS. There is no rate limiting, CSRF token, durable job queue, or multi-worker shared job state. Do not expose this local MVP to the public internet as-is. Video artifacts created before video ownership tracking have no trustworthy owner record and are intentionally inaccessible until they are reprocessed under an account; do not auto-assign legacy artifacts in a multi-account installation.
 
 ## Persistent Chat Storage
 
-Chats are stored independently as JSON files under `data/chats/{username}/{chat_id}.json`. The API creates directories automatically and uses atomic replacement when updating a file. A chat record contains its ID and owner, title, creation/update timestamps, optional video ID and metadata, summary/transcript fields, and the complete ordered message history. Messages preserve IDs, roles, content, timestamps, and optional assistant sources, evidence timestamps, and answer-audio references.
+Chats are stored independently as JSON files under `data/chats/{username}/{chat_id}.json`. The API creates directories automatically and uses atomic replacement when updating a file. A chat record contains its ID and owner, title, creation/update timestamps, optional owned video ID and metadata, summary/transcript fields, and the complete ordered message history. Messages preserve IDs, roles, content, timestamps, and optional assistant sources, evidence timestamps, and answer-audio references.
 
-When an associated video has canonical artifacts, chat detail responses restore summary data from `data/summaries/{video_id}.json` and transcript data from `data/transcripts/{video_id}.json`. These potentially large artifacts are referenced through the video ID rather than copied into every chat file unless explicitly supplied in chat content. Files remain scoped to the authenticated username; client-provided usernames are rejected as identity, and unknown or foreign chat IDs return `404`. Chat IDs are server-generated 32-character lowercase hexadecimal identifiers and path-like IDs are rejected. Malformed chat JSON fails closed with `503` without returning filesystem paths.
+When an associated video has canonical artifacts, chat detail responses restore summary data from `data/summaries/{video_id}.json` and transcript data from `data/transcripts/{video_id}.json`, after ownership is checked. These potentially large artifacts are referenced through the video ID rather than copied into every chat file unless explicitly supplied in chat content. Files remain scoped to the authenticated username; client-provided usernames are rejected as identity, and unknown or foreign chat/video IDs return `404`. Chat IDs are server-generated 32-character lowercase hexadecimal identifiers and path-like IDs are rejected. Malformed chat JSON fails closed with `503` without returning filesystem paths.
 
 Chat API (all endpoints require the HTTP-only authenticated session cookie):
 
@@ -240,7 +242,7 @@ Chat endpoints (authenticated):
 
 Video endpoints:
 
-The planned REST surface is:
+Implemented video endpoints (all require an authenticated owner):
 
 - `POST /videos/upload`
 - `POST /videos/youtube`
@@ -254,6 +256,8 @@ The planned REST surface is:
 - `POST /videos/{video_id}/voice-question`
 - `GET /videos/{video_id}/summary/audio`
 - `GET /videos/{video_id}/answers/{answer_id}/audio`
+
+Upload and YouTube ingestion assign the new video ID to the current account before processing begins. Status, replayable SSE progress, media playback, transcript, summary, summary audio, typed/voice questions, and voice-answer audio reject anonymous requests and foreign owners. `GET /videos/{video_id}` is also owner-checked.
 
 Long-running processing runs in the background with stage snapshots and replayable events. Stages include `validating`, `downloading`, `extracting_audio`, `detecting_language`, `transcribing`, `building_transcript`, `chunking`, `embedding`, `indexing`, `summarizing`, `generating_summary_audio`, `completed`, and `failed`. The event stream emits `stage_started`, `stage_progress`, `stage_completed`, `stage_failed`, and `processing_completed`.
 
@@ -306,7 +310,8 @@ The current suite verifies retrieval thresholds, raw transcript fallback, voice 
 ## Current limitations
 
 - Job status is in memory and `BackgroundTasks` is process-local. A restart loses status, and multiple workers do not share jobs.
-- Authentication protects chat storage, but video routes are not protected and accounts do not have video ownership. There is no rate limiting or durable job queue. Sessions are process-local and the cookie is configured for local HTTP. This is not ready for an internet-facing multi-user deployment.
+- Sessions and processing jobs are process-local. Backend restart invalidates sessions and loses active job status; multiple workers do not share session or job state. There is no rate limiting or CSRF defense, and the cookie is configured for local HTTP. This is not ready for an internet-facing deployment.
+- Video owner metadata is local JSON beside the source media. Older video artifacts without an owner entry cannot be safely attributed automatically and must be reprocessed under an account.
 - ChromaDB, transcripts, summaries, and audio use local filesystem storage. Use a database/object store and isolated vector namespaces for multi-instance deployment.
 - ASR, embeddings, Groq, FFmpeg, and Windows SAPI TTS are blocking and resource-intensive. Production deployment needs bounded worker pools, retries, quotas, and retention cleanup.
 
@@ -318,45 +323,10 @@ The current suite verifies retrieval thresholds, raw transcript fallback, voice 
 - **YouTube download failure:** verify the URL is authorized and accessible to `yt-dlp`; network and platform restrictions can prevent retrieval.
 - **Windows PowerShell activation failure:** use the project interpreter directly or apply your organization's approved execution-policy setting.
 
-## Current Phase Validation
+## Current Runtime Behavior
 
-Current implementation status:
+Uploads and YouTube URLs start background processing and return a generated `video_id`. The original source remains in `data/videos/`; extracted audio uses a temporary working directory. Processing stages and replayable SSE events are process-local. On completion, the frontend loads saved playback, transcript, and summary context and creates a persistent chat. New chat creates another chat for the selected video and does not redownload or reprocess it.
 
-- Background upload and YouTube processing endpoints are active.
-- `yt-dlp` downloads now persist to `data/videos/{video_id}{extension}` instead of a temporary processing directory.
-- FFmpeg audio extraction still occurs in a temporary working directory to create mono 16 kHz WAV for ASR.
-- JSON transcript artifacts preserve segment text, start seconds, and end seconds.
-- In-memory processing status tracking and failure reporting remain in place.
-- Temporary extracted WAV files are cleaned up without deleting the persisted source artifact.
-- Persistent source playback is served by `GET /videos/{video_id}/media` only after processing reaches `completed`.
+Persistent chat JSON contains the complete conversation. Groq receives only the latest three prior user/assistant messages for chat continuity, plus the selected video's retrieved evidence or bounded raw-transcript fallback. Transcript evidence is video-scoped, threshold-filtered, timestamped, and exposed as collapsed per-answer sources in the UI.
 
-Completed in Phase 6:
-
-- Added backend-owned processing stage snapshots and replayable SSE events.
-- Added truthful chunk-count progress for transcript chunking, embedding, and indexing.
-- Added frontend SSE subscription, refresh recovery, activity details, and a responsive processing workspace.
-
-Completed in Phase 3:
-
-- Added segment-aware transcript chunking with preserved start/end timestamps.
-- Added local Sentence Transformers embedding support with injectable test doubles.
-- Added persistent ChromaDB storage with one `video_<video_id>` collection per video.
-- Added video-scoped similarity retrieval and timestamped RAG context construction.
-- Added tests for collection isolation, metadata persistence, relevance, and empty collections.
-
-Completed in Phase 4:
-
-- Added lazy Groq client initialization using `GROQ_API_KEY` and `GROQ_MODEL`, defaulting to `openai/gpt-oss-120b`.
-- Added automatic transcript indexing and structured hierarchical summaries under `data/summaries/`.
-- Added `GET /videos/{video_id}/summary` and grounded `POST /videos/{video_id}/question` with timestamp sources.
-- Added mocked LLM tests that run without a real Groq API key or network access.
-
-Completed in Phase 5:
-
-- Added a replaceable TTS abstraction with a local `pyttsx3` adapter using the Windows SAPI voice installed on the host.
-- Added WAV audio generation for automatic summaries and grounded answers.
-- Added `POST /videos/{video_id}/voice-question` with multipart microphone audio, faster-whisper transcription, existing video-scoped RAG, and a voice answer location.
-- Added summary and answer audio download routes.
-- Voice question audio and transcripts are temporary/query-only artifacts and are never indexed into ChromaDB.
-
-The initial TTS adapter depends on `pyttsx3` and an installed Windows SAPI voice. It is selected because it runs locally without API credentials or network access. A different provider can be supplied through the `TTSService` protocol; hosts without a usable SAPI voice should provide another adapter rather than changing the RAG pipeline.
+Vanish clears the video directory, including `.owners.json`, along with the other documented allowlisted runtime data. It leaves project files and caches outside that allowlist untouched.

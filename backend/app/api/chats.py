@@ -25,6 +25,7 @@ from backend.app.services.chat_storage import (
     InvalidChatIdError,
     chat_store,
 )
+from backend.app.services.video_storage import VideoOwnershipError, video_ownership
 
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -80,6 +81,17 @@ def _raise_storage_error(error: Exception) -> None:
     raise HTTPException(status_code=503, detail="Chat storage is unavailable") from error
 
 
+def _require_video_owner(video_id: str | None, username: str) -> None:
+    if not video_id:
+        return
+    try:
+        owned = video_ownership.is_owned_by(video_id, username)
+    except VideoOwnershipError as exc:
+        raise HTTPException(status_code=503, detail="Video storage is unavailable") from exc
+    if not owned:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+
 @router.get("", response_model=list[ChatListItem])
 def list_chats(user: AuthenticatedUser = Depends(get_current_user)) -> list[ChatListItem]:
     try:
@@ -90,6 +102,7 @@ def list_chats(user: AuthenticatedUser = Depends(get_current_user)) -> list[Chat
 
 @router.post("", response_model=ChatRecord, status_code=status.HTTP_201_CREATED)
 def create_chat(request: ChatCreate, user: AuthenticatedUser = Depends(get_current_user)) -> ChatRecord:
+    _require_video_owner(request.video_id, user.username)
     try:
         return chat_store.create(user.username, request)
     except ChatStoreError as exc:
@@ -235,7 +248,9 @@ def get_chat_answer_audio(
 @router.get("/{chat_id}", response_model=ChatRecord)
 def get_chat(chat_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> ChatRecord:
     try:
-        return chat_store.get(user.username, chat_id)
+        chat = chat_store.get(user.username, chat_id)
+        _require_video_owner(chat.video_id, user.username)
+        return chat
     except (ChatNotFoundError, ChatStoreError, InvalidChatIdError) as exc:
         _raise_storage_error(exc)
 
@@ -243,6 +258,10 @@ def get_chat(chat_id: str, user: AuthenticatedUser = Depends(get_current_user)) 
 @router.put("/{chat_id}", response_model=ChatRecord)
 def update_chat(chat_id: str, request: ChatUpdate, user: AuthenticatedUser = Depends(get_current_user)) -> ChatRecord:
     try:
+        existing = chat_store.get(user.username, chat_id)
+        _require_video_owner(existing.video_id, user.username)
+        changes = request.model_dump(exclude_unset=True)
+        _require_video_owner(changes.get("video_id", existing.video_id), user.username)
         return chat_store.update(user.username, chat_id, request)
     except (ChatNotFoundError, ChatStoreError, InvalidChatIdError) as exc:
         _raise_storage_error(exc)

@@ -10,6 +10,7 @@ export class ApiError extends Error {
 }
 
 let onSessionExpired: (() => void) | null = null;
+const pendingGetRequests = new Map<string, Promise<unknown>>();
 
 export function setSessionExpiredHandler(handler: (() => void) | null) {
   onSessionExpired = handler;
@@ -103,14 +104,33 @@ function apiUrl(path: string) {
   return `${API_BASE}${path}`;
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const method = (options?.method || "GET").toUpperCase();
+  if (method === "GET") {
+    const pending = pendingGetRequests.get(path);
+    if (pending) return pending as Promise<T>;
+  }
+  const pending = performRequest<T>(path, options);
+  if (method === "GET") {
+    pendingGetRequests.set(path, pending);
+    void pending.finally(() => {
+      if (pendingGetRequests.get(path) === pending) pendingGetRequests.delete(path);
+    }).catch(() => undefined);
+  }
+  return pending;
+}
+
+async function performRequest<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(apiUrl(path), { ...options, credentials: "include" });
   } catch {
     throw new Error("Can't reach the VideoMind server. Check that the backend is running and try again.");
   }
-  if (response.status === 401 && !path.startsWith("/auth/")) onSessionExpired?.();
+  if (response.status === 401 && !path.startsWith("/auth/")) {
+    pendingGetRequests.clear();
+    onSessionExpired?.();
+  }
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try {
@@ -131,6 +151,7 @@ export function getCurrentUser() {
 }
 
 export function login(username: string, password: string) {
+  pendingGetRequests.clear();
   return request<AuthUser>("/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -147,6 +168,7 @@ export function register(username: string, password: string) {
 }
 
 export function logout() {
+  pendingGetRequests.clear();
   return request<void>("/auth/logout", { method: "POST" });
 }
 

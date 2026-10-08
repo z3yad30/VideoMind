@@ -6,11 +6,14 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from backend.app.main import app
+from backend.app.api.dependencies import get_current_user
+from backend.app.services.auth import AuthenticatedUser
 from backend.app.services.asr import ASRSegment
 from backend.app.services.llm import SUMMARY_FIELDS, VideoAIService
 from backend.app.services.media import MediaService
 from backend.app.services.voice import VoiceQuestionService
 import backend.app.api.videos as videos_api
+from backend.app.services.video_storage import VideoOwnershipStore
 
 
 class FakeASR:
@@ -47,6 +50,11 @@ class FakeAI:
 
 @pytest.mark.asyncio
 async def test_voice_question_runs_asr_rag_and_tts_without_indexing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    video_id = "a" * 32
+    ownership = VideoOwnershipStore(tmp_path / "videos")
+    ownership.register(video_id, "alice")
+    monkeypatch.setattr(videos_api, "video_ownership", ownership)
+    monkeypatch.setitem(app.dependency_overrides, get_current_user, lambda: AuthenticatedUser("alice"))
     ai = FakeAI()
     tts = FakeTTS()
     service = VoiceQuestionService(
@@ -61,7 +69,7 @@ async def test_voice_question_runs_asr_rag_and_tts_without_indexing(monkeypatch:
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            "/videos/video-1/voice-question",
+            f"/videos/{video_id}/voice-question",
             files={"file": ("question.wav", b"microphone audio", "audio/wav")},
         )
 
@@ -69,8 +77,8 @@ async def test_voice_question_runs_asr_rag_and_tts_without_indexing(monkeypatch:
     assert response.json()["transcribed_question"] == "What happened next?"
     assert response.json()["answer"] == "The next step was deployment."
     assert response.json()["sources"] == [{"start": 2.0, "end": 3.0, "text": "Deployment followed."}]
-    assert response.json()["audio_answer_location"].startswith("/videos/video-1/answers/")
-    assert ai.questions == [("video-1", "What happened next?")]
+    assert response.json()["audio_answer_location"].startswith(f"/videos/{video_id}/answers/")
+    assert ai.questions == [(video_id, "What happened next?")]
     assert len(tts.calls) == 1
 
 

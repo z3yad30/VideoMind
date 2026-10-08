@@ -13,15 +13,18 @@ from backend.app.main import app
 from backend.app.services.auth import AuthenticationService
 from backend.app.services.chat_storage import ChatStore
 from backend.app.services.user_storage import UserStore
+from backend.app.services.video_storage import VideoOwnershipStore
 
 
 @pytest.fixture
 def isolated_services(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ChatStore:
     auth_service = AuthenticationService(UserStore(tmp_path / "users" / "users.json"))
     chat_service = ChatStore(tmp_path / "data" / "chats")
+    video_service = VideoOwnershipStore(tmp_path / "data" / "videos")
     monkeypatch.setattr(auth_api, "auth_service", auth_service)
     monkeypatch.setattr(auth_dependencies, "auth_service", auth_service)
     monkeypatch.setattr(chats_api, "chat_store", chat_service)
+    monkeypatch.setattr(chats_api, "video_ownership", video_service)
     return chat_service
 
 
@@ -68,7 +71,9 @@ async def test_chat_crud_and_list(isolated_services: ChatStore) -> None:
 async def test_chat_persists_after_store_reload(isolated_services: ChatStore) -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await register_and_login(client, "alice")
-        created = await client.post("/chats", json={"video_id": "video1", "messages": [{"role": "assistant", "content": "Saved reply"}]})
+        video_id = "1" * 32
+        chats_api.video_ownership.register(video_id, "alice")
+        created = await client.post("/chats", json={"video_id": video_id, "messages": [{"role": "assistant", "content": "Saved reply"}]})
         chat_id = created.json()["chat_id"]
 
     reloaded_store = ChatStore(isolated_services.root)
@@ -105,8 +110,10 @@ async def test_chat_question_persists_both_messages_sources_audio_and_reload(
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await register_and_login(client, "alice")
+        video_id = "2" * 32
+        chats_api.video_ownership.register(video_id, "alice")
         created = await client.post("/chats", json={
-            "video_id": "video-1",
+            "video_id": video_id,
             "messages": [
                 {"role": "user", "content": f"Prior question {index}"}
                 for index in range(5)
@@ -127,7 +134,7 @@ async def test_chat_question_persists_both_messages_sources_audio_and_reload(
     assert payload["answer_audio_location"] == expected_audio_ref
     assert len(restored.json()["messages"]) == 7
     assert restored.json()["messages"][-1]["content"] == "A grounded answer"
-    assert ai.calls[0] == ("video-1", "Explain this concept", [
+    assert ai.calls[0] == (video_id, "Explain this concept", [
         {"role": "user", "content": "Prior question 2"},
         {"role": "user", "content": "Prior question 3"},
         {"role": "user", "content": "Prior question 4"},
@@ -168,6 +175,7 @@ async def test_chat_answer_audio_generation_is_idempotent_persisted_and_owner_sc
     ) as bob:
         await register_and_login(alice, "alice")
         await register_and_login(bob, "bob")
+        chats_api.video_ownership.register("c" * 32, "alice")
         created = await alice.post("/chats", json={
             "video_id": "c" * 32,
             "messages": [{"role": "assistant", "content": "A saved answer"}],
@@ -203,7 +211,9 @@ async def test_chat_question_requires_an_available_video(isolated_services: Chat
         no_video_question = await client.post(
             f"/chats/{no_video.json()['chat_id']}/messages", json={"question": "Question"}
         )
-        missing_video = await client.post("/chats", json={"video_id": "missing-video"})
+        video_id = "3" * 32
+        chats_api.video_ownership.register(video_id, "alice")
+        missing_video = await client.post("/chats", json={"video_id": video_id})
         missing_video_question = await client.post(
             f"/chats/{missing_video.json()['chat_id']}/messages", json={"question": "Question"}
         )
@@ -219,12 +229,14 @@ async def test_chat_detail_restores_canonical_video_context(isolated_services: C
     data_root = isolated_services.data_root
     (data_root / "transcripts").mkdir(parents=True)
     (data_root / "summaries").mkdir(parents=True)
-    (data_root / "transcripts" / "video1.json").write_text(json.dumps({"video_id": "video1", "segments": [{"text": "Transcript", "start": 1, "end": 2}]}), encoding="utf-8")
-    (data_root / "summaries" / "video1.json").write_text(json.dumps({"video_id": "video1", "summary": {"Overview": "A summary"}}), encoding="utf-8")
+    video_id = "4" * 32
+    (data_root / "transcripts" / f"{video_id}.json").write_text(json.dumps({"video_id": video_id, "segments": [{"text": "Transcript", "start": 1, "end": 2}]}), encoding="utf-8")
+    (data_root / "summaries" / f"{video_id}.json").write_text(json.dumps({"video_id": video_id, "summary": {"Overview": "A summary"}}), encoding="utf-8")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await register_and_login(client, "alice")
-        created = await client.post("/chats", json={"video_id": "video1"})
+        chats_api.video_ownership.register(video_id, "alice")
+        created = await client.post("/chats", json={"video_id": video_id})
         restored = await client.get("/chats/" + created.json()["chat_id"])
 
     assert restored.json()["summary"] == {"Overview": "A summary"}
@@ -264,6 +276,7 @@ async def test_chat_username_cannot_be_supplied_by_client(isolated_services: Cha
 async def test_chat_clients_cannot_inject_answer_audio_references(isolated_services: ChatStore) -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await register_and_login(client, "alice")
+        chats_api.video_ownership.register("a" * 32, "alice")
         created = await client.post("/chats", json={"video_id": "a" * 32})
         chat_id = created.json()["chat_id"]
         forged_create = await client.post("/chats", json={
@@ -274,6 +287,25 @@ async def test_chat_clients_cannot_inject_answer_audio_references(isolated_servi
         })
 
     assert forged_create.status_code == forged_update.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_users_cannot_attach_another_users_video_to_their_chat(isolated_services: ChatStore) -> None:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as alice, AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as bob:
+        await register_and_login(alice, "alice")
+        await register_and_login(bob, "bob")
+        video_id = "5" * 32
+        chats_api.video_ownership.register(video_id, "alice")
+        alice_chat = await alice.post("/chats", json={"video_id": video_id})
+        foreign_create = await bob.post("/chats", json={"video_id": video_id})
+        foreign_update = await bob.post("/chats", json={})
+        update = await bob.put(f"/chats/{foreign_update.json()['chat_id']}", json={"video_id": video_id})
+
+    assert alice_chat.status_code == 201
+    assert foreign_create.status_code == 404
+    assert update.status_code == 404
 
 
 @pytest.mark.asyncio

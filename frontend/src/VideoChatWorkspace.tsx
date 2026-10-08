@@ -78,6 +78,13 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
   const loadChat = async (chatId: string) => {
     const sequence = ++loadSequenceRef.current;
     setSelectedChatId(chatId);
+    setSelectedChat(null);
+    setVideoId(null);
+    setStatus(null);
+    setSummary(null);
+    setTranscript([]);
+    setStages([]);
+    setActivity([]);
     setLoadingChat(true);
     setNotice(null);
     setActiveView("chat");
@@ -133,7 +140,7 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
   useEffect(() => {
     if (!videoId) return;
     let cancelled = false;
-    const source = new EventSource(eventsUrl(videoId));
+    const source = new EventSource(eventsUrl(videoId), { withCredentials: true });
     const refreshStatus = async () => {
       try {
         const nextStatus = await getStatus(videoId);
@@ -201,6 +208,8 @@ export default function VideoChatWorkspace({ username, onLogout, theme, onThemeT
     setTranscript([]);
     try {
       const job = file ? await uploadVideo(file) : await processYouTube(sourceUrl.trim());
+      setFile(null);
+      setSourceUrl("");
       pendingAutoChatRef.current = job.video_id;
       autoChatCreatedRef.current = null;
       setVideoId(job.video_id);

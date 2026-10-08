@@ -8,12 +8,24 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from backend.app.main import app
+from backend.app.api.dependencies import get_current_user
+from backend.app.services.auth import AuthenticatedUser
 from backend.app.services.asr import ASRSegment
 from backend.app.services.media import MediaService
 from backend.app.services.video_processing import VideoProcessingService
 from backend.app.schemas.videos import YouTubeRequest
 import backend.app.api.videos as videos_api
 import backend.app.services.media as media_module
+from backend.app.services.video_storage import VideoOwnershipStore
+
+
+@pytest.fixture(autouse=True)
+def authenticated_video_user(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> VideoOwnershipStore:
+    owners = VideoOwnershipStore(tmp_path / "data" / "videos")
+    monkeypatch.setattr(videos_api, "video_ownership", owners)
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser("alice")
+    yield owners
+    app.dependency_overrides.pop(get_current_user, None)
 
 
 class FakeMedia:
@@ -100,22 +112,26 @@ async def test_get_video_returns_404_for_unknown_video(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_get_video_returns_job_for_known_video(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_video_returns_job_for_known_video(monkeypatch: pytest.MonkeyPatch, authenticated_video_user: VideoOwnershipStore) -> None:
+    video_id = "a" * 32
+    authenticated_video_user.register(video_id, "alice")
     monkeypatch.setattr(
         videos_api,
         "video_service",
-        SimpleNamespace(get_job=lambda video_id: SimpleNamespace(video_id=video_id, status="transcribing")),
+        SimpleNamespace(get_job=lambda requested_id: SimpleNamespace(video_id=requested_id, status="transcribing")),
     )
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/videos/video-1")
+        response = await client.get(f"/videos/{video_id}")
 
     assert response.status_code == 200
-    assert response.json() == {"video_id": "video-1", "status": "transcribing"}
+    assert response.json() == {"video_id": video_id, "status": "transcribing"}
 
 
 @pytest.mark.asyncio
-async def test_question_is_rejected_until_processing_completes(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_question_is_rejected_until_processing_completes(monkeypatch: pytest.MonkeyPatch, authenticated_video_user: VideoOwnershipStore) -> None:
+    video_id = "b" * 32
+    authenticated_video_user.register(video_id, "alice")
     class Job:
         status = "transcribing"
 
@@ -127,16 +143,18 @@ async def test_question_is_rejected_until_processing_completes(monkeypatch: pyte
     monkeypatch.setattr(videos_api, "ai_service", AI())
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/videos/video-1/question", json={"question": "What happened?"})
+        response = await client.post(f"/videos/{video_id}/question", json={"question": "What happened?"})
 
     assert response.status_code == 409
 
 
 @pytest.mark.asyncio
-async def test_standalone_video_question_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_standalone_video_question_still_works(monkeypatch: pytest.MonkeyPatch, authenticated_video_user: VideoOwnershipStore) -> None:
+    video_id = "c" * 32
+    authenticated_video_user.register(video_id, "alice")
     class AI:
         def answer_question(self, video_id: str, question: str):
-            assert (video_id, question) == ("video-1", "What happened?")
+            assert (video_id, question) == ("c" * 32, "What happened?")
             return {"answer": "A standalone answer", "sources": []}
 
     monkeypatch.setattr(
@@ -147,7 +165,7 @@ async def test_standalone_video_question_still_works(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(videos_api, "ai_service", AI())
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/videos/video-1/question", json={"question": "What happened?"})
+        response = await client.post(f"/videos/{video_id}/question", json={"question": "What happened?"})
 
     assert response.status_code == 200
     assert response.json() == {"answer": "A standalone answer", "sources": []}
@@ -183,15 +201,17 @@ def test_corrupt_media_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_invalid_youtube_url_and_malformed_question_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_invalid_youtube_url_and_malformed_question_are_rejected(monkeypatch: pytest.MonkeyPatch, authenticated_video_user: VideoOwnershipStore) -> None:
+    video_id = "d" * 32
+    authenticated_video_user.register(video_id, "alice")
     monkeypatch.setattr(
         videos_api,
         "video_service",
-        SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")),
+        SimpleNamespace(get_job=lambda requested_id: SimpleNamespace(status="completed")),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         invalid_url = await client.post("/videos/youtube", json={"url": "not-a-url"})
-        malformed_question = await client.post("/videos/video-1/question", json={"question": 12})
+        malformed_question = await client.post(f"/videos/{video_id}/question", json={"question": 12})
 
     assert invalid_url.status_code == 422
     assert malformed_question.status_code == 422
@@ -269,9 +289,84 @@ def test_youtube_request_rejects_non_youtube_hosts() -> None:
         YouTubeRequest(url="https://example.com/video")
 
 
+def test_video_ownership_persists_and_cannot_be_reassigned(tmp_path: Path) -> None:
+    video_id = "e" * 32
+    original = VideoOwnershipStore(tmp_path / "videos")
+    original.register(video_id, "alice")
+
+    restored = VideoOwnershipStore(tmp_path / "videos")
+    assert restored.is_owned_by(video_id, "alice")
+    assert not restored.is_owned_by(video_id, "bob")
+    with pytest.raises(Exception, match="Video ownership is unavailable"):
+        restored.register(video_id, "bob")
+
+
 @pytest.mark.asyncio
-async def test_media_endpoint_requires_completed_processing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_video_upload_and_youtube_jobs_are_persistently_owned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, authenticated_video_user: VideoOwnershipStore
+) -> None:
+    video_ids = iter(["f" * 32, "0" * 32])
+    jobs = SimpleNamespace(create_job=lambda: next(video_ids))
+    started: list[tuple[str, str | None]] = []
+
+    class UploadMedia:
+        @staticmethod
+        def validate_filename(filename: str) -> str:
+            return ".mp4"
+
+        @staticmethod
+        def save_upload(file, destination: Path) -> Path:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(file.file.read())
+            return destination
+
+    monkeypatch.setattr(videos_api, "settings", SimpleNamespace(project_root=tmp_path))
+    monkeypatch.setattr(videos_api, "video_service", jobs)
+    monkeypatch.setattr(videos_api, "media_service", UploadMedia())
+    monkeypatch.setattr(videos_api, "_start_processing", lambda video_id, _path, source_url=None: started.append((video_id, source_url)))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        uploaded = await client.post("/videos/upload", files={"file": ("source.mp4", b"video", "video/mp4")})
+        youtube = await client.post("/videos/youtube", json={"url": "https://www.youtube.com/watch?v=example"})
+
+    assert uploaded.status_code == youtube.status_code == 202
+    assert authenticated_video_user.is_owned_by("f" * 32, "alice")
+    assert authenticated_video_user.is_owned_by("0" * 32, "alice")
+    assert started == [("f" * 32, None), ("0" * 32, "https://www.youtube.com/watch?v=example")]
+
+
+@pytest.mark.asyncio
+async def test_video_routes_reject_anonymous_and_foreign_users(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    authenticated_video_user: VideoOwnershipStore,
+) -> None:
+    video_id = "9" * 32
+    authenticated_video_user.register(video_id, "alice")
+    media_path = tmp_path / "data" / "videos" / f"{video_id}.mp4"
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"private video")
+    monkeypatch.setattr(videos_api, "settings", SimpleNamespace(project_root=tmp_path))
+    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda _: SimpleNamespace(status="completed")))
+
+    app.dependency_overrides.pop(get_current_user)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as anonymous:
+        anonymous_response = await anonymous.get(f"/videos/{video_id}/media")
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser("bob")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as bob:
+        status_response = await bob.get(f"/videos/{video_id}/status")
+        media_response = await bob.get(f"/videos/{video_id}/media")
+        question_response = await bob.post(f"/videos/{video_id}/question", json={"question": "What happened?"})
+
+    assert anonymous_response.status_code == 401
+    assert status_response.status_code == media_response.status_code == question_response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_media_endpoint_requires_completed_processing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, authenticated_video_user: VideoOwnershipStore) -> None:
     media_id = "a" * 32
+    authenticated_video_user.register(media_id, "alice")
     media_path = tmp_path / "data" / "videos" / f"{media_id}.mp4"
     media_path.parent.mkdir(parents=True, exist_ok=True)
     media_path.write_bytes(b"video")
@@ -286,8 +381,9 @@ async def test_media_endpoint_requires_completed_processing(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
-async def test_media_endpoint_serves_persisted_video(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_media_endpoint_serves_persisted_video(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, authenticated_video_user: VideoOwnershipStore) -> None:
     media_id = "b" * 32
+    authenticated_video_user.register(media_id, "alice")
     media_path = tmp_path / "data" / "videos" / f"{media_id}.mp4"
     media_path.parent.mkdir(parents=True, exist_ok=True)
     media_path.write_bytes(b"video")
