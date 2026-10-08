@@ -145,7 +145,7 @@ Chat message JSON stores only an audio URL/reference, never WAV bytes. New chat-
 
 In the chat, each assistant reply's **Relevant transcript / Sources** section starts collapsed to keep the conversation compact. Its keyboard-accessible expand button reveals transcript excerpts and start/end timestamps; each timestamp seeks playback to that point. Expand/collapse state is independent for every reply. This changes only source presentation, not retrieval or answer generation.
 
-Persistent chat history is the complete ordered conversation and survives backend reloads. It is separate from LLM context: each chat question sends at most the latest three prior user/assistant messages to Groq, never the full history. Retrieved evidence remains the authority for factual answers. Chat files are user data and are not removed by the Vanish runtime cleanup utility.
+Persistent chat history is the complete ordered conversation and survives backend reloads. It is separate from LLM context: each chat question sends at most the latest three prior user/assistant messages to Groq, never the full history. Retrieved evidence remains the authority for factual answers. Chat files and authentication user records are runtime user data and are removed when Vanish is run.
 
 ## Running the Frontend
 
@@ -177,23 +177,23 @@ Frontend responsibilities are split across `frontend/src/App.tsx` for authentica
 
 ## Runtime Data Reset: Vanish
 
-Use the standalone cleanup utility to remove only VideoMind’s generated runtime data while leaving the repository and source code intact.
+Use the standalone cleanup utility to remove all local VideoMind application runtime and user data while leaving the repository and source code intact.
 
 ### What Vanish clears
 
 `python scripts/vanish.py`
 
-This command targets the project’s local runtime storage under `data/` and removes the generated contents from:
+This standalone command targets only these explicitly allowlisted runtime directories under `data/`:
 
 - `data/videos/`
 - `data/audio/`
 - `data/transcripts/`
 - `data/summaries/`
 - `data/chroma/`
+- `data/users/`
+- `data/chats/`
 
-It preserves the `data/` directory itself and keeps the expected runtime folders in place so the project can regenerate data cleanly.
-
-The cleanup allowlist does not include `data/users/`, so registered accounts are retained.
+Vanish clears video-processing artifacts and authentication, user, and chat runtime data, including registered account records and persistent chat histories. It preserves `data/` and all seven allowlisted directories so the application can regenerate them cleanly.
 
 ### What Vanish preserves
 
@@ -205,12 +205,12 @@ Vanish does not delete:
 - `.git` metadata
 - README and documentation
 - `.env` and config files
-- any cache outside the runtime data scope
+- project caches outside the explicit runtime data allowlist
 - anything outside the repository’s `data/` directory
 
-### Cache protection
+### Allowlist and Cache Protection
 
-Project caches remain untouched. The script explicitly clears only the allowlisted runtime directories under `data/` and never targets repository caches such as `.pytest_cache`, build output, or other directories outside that boundary.
+Project caches remain untouched. The script explicitly clears only the seven listed runtime directories; it does not use a broad `data/*` deletion and does not target repository caches such as `.pytest_cache`, build output, or any project cache outside the runtime data allowlist.
 
 ### Server independence
 

@@ -4,7 +4,7 @@ import shutil
 import sys
 from pathlib import Path
 
-RUNTIME_DATA_DIRECTORIES = ("audio", "chroma", "summaries", "transcripts", "videos")
+RUNTIME_DATA_DIRECTORIES = ("videos", "audio", "transcripts", "summaries", "chroma", "users", "chats")
 
 
 class VanishError(RuntimeError):
@@ -25,15 +25,15 @@ def resolve_project_root(start: Path | str | None = None) -> Path:
 def resolve_runtime_data_dir(project_root: Path | str | None = None) -> Path:
     """Resolve the repository-bound runtime data directory while rejecting unsafe targets."""
     root = resolve_project_root(project_root)
-    target = (root / "data").resolve(strict=False)
+    data_path = root / "data"
+    if data_path.is_symlink():
+        raise VanishError(f"Unsafe runtime data target: {data_path} is a symlink and cannot be used for cleanup.")
+    target = data_path.resolve(strict=False)
 
     if target == root:
         raise VanishError("Unsafe runtime data target: the project root is not allowed as the cleanup target.")
-    if target.parent == root:
-        # This is the expected directory under the repo root; allow it.
-        pass
-    if target.is_symlink():
-        raise VanishError(f"Unsafe runtime data target: {target} is a symlink and cannot be used for cleanup.")
+    if target.parent != root:
+        raise VanishError(f"Unsafe runtime data target: {target} is not the expected data directory under {root}.")
     if not target.exists():
         target.mkdir(parents=True, exist_ok=True)
     if not target.is_dir():
@@ -75,16 +75,23 @@ def clear_runtime_data(project_root: Path | str | None = None, target: Path | st
     if target is not None:
         expected_data_dir = _validate_cleanup_target(target, expected_data_dir)
 
-    print(f"Vanish: starting cleanup for VideoMind runtime data at {expected_data_dir}")
-    print(f"Vanish: clearing runtime directories: {', '.join(RUNTIME_DATA_DIRECTORIES)}")
+    print(f"Vanish: clearing VideoMind video-processing, authentication, user, and chat runtime data at {expected_data_dir}")
+    print(f"Vanish: allowlisted directories: {', '.join(RUNTIME_DATA_DIRECTORIES)}")
+
+    for directory_name in RUNTIME_DATA_DIRECTORIES:
+        runtime_dir = expected_data_dir / directory_name
+        if runtime_dir.is_symlink():
+            raise VanishError(f"Unsafe runtime data directory: {runtime_dir} is a symlink and cannot be cleared.")
+        if runtime_dir.resolve(strict=False).parent != expected_data_dir:
+            raise VanishError(f"Unsafe runtime data directory: {runtime_dir} is outside {expected_data_dir}.")
 
     for directory_name in RUNTIME_DATA_DIRECTORIES:
         runtime_dir = expected_data_dir / directory_name
         runtime_dir.mkdir(parents=True, exist_ok=True)
         cleared = _clear_directory_contents(runtime_dir)
-        print(f"Vanish: cleared {cleared} item(s) from {runtime_dir}")
+        print(f"Vanish: cleared {cleared} item(s) from data/{directory_name}/")
 
-    print(f"Vanish: completed; preserved runtime directory structure in {expected_data_dir}")
+    print(f"Vanish: completed; preserved data/ and all seven allowlisted directories under {expected_data_dir}")
     return expected_data_dir
 
 

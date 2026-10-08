@@ -12,7 +12,7 @@
 
 The implemented goal is to let a user bring one media source, wait for background processing, inspect its transcript and summary, and ask questions whose answers are grounded in that video's evidence. The system now supports a retrieval-policy gate, a raw transcript fallback pathway, and bounded per-video conversation history so follow-up questions can work without leaking context across videos.
 
-The repository also includes a standalone runtime reset helper, `scripts/vanish.py`, which removes generated processing artifacts from the local `data/` tree without deleting the project itself or other caches. The backend implements local username/password accounts, cookie sessions, and persistent per-user chat ownership. Video routes remain public and are not account-owned. There is no relational database. It remains a local MVP, not an internet-facing multi-user deployment.
+The repository also includes a standalone runtime reset helper, `scripts/vanish.py`, which removes all allowlisted application runtime data from the local `data/` tree, including authentication/user records and persistent chats, without deleting the project itself or project caches outside that allowlist. The backend implements local username/password accounts, cookie sessions, and persistent per-user chat ownership. Video routes remain public and are not account-owned. There is no relational database. It remains a local MVP, not an internet-facing multi-user deployment.
 
 The frontend implements a cookie-backed login/register experience and gates a chatbot-style workspace on the current session. The workspace displays complete chronological chat history, distinct user and assistant messages, and a bottom-anchored composer. Saved chat records remain backend-authoritative; selecting a chat restores its video ID, summary, transcript, and messages. New video preserves the existing ingestion pipeline and creates a chat when processing finishes, while New chat links another conversation to the already-processed video without re-ingestion.
 
@@ -81,7 +81,7 @@ flowchart TD
 - **Database:** No relational database or ORM is implemented. `backend/app/database/__init__.py` and `backend/app/models/__init__.py` are empty.
 - **Job state:** In-memory dictionaries inside one `VideoProcessingService` instance; lost on restart and not shared between workers.
 - **File storage:** Local `data/` directories for persistent source media in `data/videos/`, transcripts, summaries, WAV artifacts, and Chroma persistence. Temporary extracted WAV/intermediate files are cleaned up without deleting the saved source video.
-- **Runtime reset utility:** `scripts/vanish.py` removes the generated contents under `data/videos/`, `data/audio/`, `data/transcripts/`, `data/summaries/`, and `data/chroma/` while preserving the directory structure and refusing unsafe targets. It is independent from the FastAPI app and runs directly as a Python script.
+- **Runtime reset utility:** `scripts/vanish.py` clears only `data/videos/`, `data/audio/`, `data/transcripts/`, `data/summaries/`, `data/chroma/`, `data/users/`, and `data/chats/`, including authentication/user and chat runtime data. It preserves those directories, refuses unsafe symlinked targets, leaves project caches outside the allowlist untouched, is independent from FastAPI, and runs directly as a Python script.
 - **AI:** Local `faster-whisper` ASR, local Sentence Transformers embeddings, Groq LLM, and local Windows SAPI TTS.
 - **Background processing:** `asyncio.create_task(asyncio.to_thread(video_service.process, ...))` in `backend/app/api/videos.py`.
 - **Queues/workers:** Not found in codebase.
@@ -93,7 +93,7 @@ flowchart TD
 | Path | Type | Purpose | Important responsibility |
 |---|---|---|---|
 | `README.md` | Documentation | Setup, architecture, limitations, API plan, phase history. | Contains some claims that are outdated relative to code. |
-| `scripts/vanish.py` | Utility | Standalone runtime-data cleanup. | Safely clears the repo-bound `data/` runtime folders while preserving the directory structure and refusing unsafe targets. |
+| `scripts/vanish.py` | Utility | Standalone runtime-data cleanup. | Clears only the seven explicitly allowlisted application runtime directories under `data/`, preserving their structure and all project caches outside the allowlist. |
 | `requirements.txt` | Configuration | Python runtime/test dependencies. | FastAPI, ASR, yt-dlp, Chroma, embeddings, Groq, TTS, pytest. |
 | `pytest.ini` | Test config | Pytest configuration. | Sets `asyncio_mode = auto`. |
 | `.env` | Local config | Runtime environment values. | Supplies Groq/model/offline settings; contains a credential-shaped key and must not be exposed. |
@@ -156,7 +156,7 @@ Generated dependencies, caches, `__pycache__`, and build output are excluded fro
 
 **Important symbols:** `resolve_project_root()`, `resolve_runtime_data_dir()`, `clear_runtime_data()`, `VanishError`.
 
-**Inputs:** Optional project root or explicit target path. **Outputs:** Deleted runtime artifacts from `data/videos`, `data/audio`, `data/transcripts`, `data/summaries`, and `data/chroma`, while leaving the directories and other project files intact. **Called by:** direct CLI execution, not by the API server. **Server dependency:** None.
+**Inputs:** Optional project root or explicit target path. **Outputs:** Deleted runtime artifacts and authentication/user/chat data from `data/videos`, `data/audio`, `data/transcripts`, `data/summaries`, `data/chroma`, `data/users`, and `data/chats`, while leaving those directories and other project files intact. Project caches outside this explicit allowlist are not cleared. **Called by:** direct CLI execution, not by the API server. **Server dependency:** None.
 
 ### `backend/app/main.py`
 
