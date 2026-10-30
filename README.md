@@ -47,35 +47,53 @@ tests/              Unit and integration tests
 requirements.txt    Runtime and test dependencies
 ```
 
-## Installation on Windows
+## First-Time Setup on Windows
 
-From the project root in PowerShell:
+The backend's Python packages are listed in `requirements.txt`. FFmpeg and Node.js are separate system tools, so they cannot be installed by pip from that file: FFmpeg handles media conversion, and Node.js/npm install and run the frontend. The `av` requirement is constrained to versions compatible with `faster-whisper`.
 
-```powershell
+Use **Command Prompt (cmd.exe)** for the commands below. Install Python 3.13, Node.js LTS, and FFmpeg if they are not already installed. These `winget` commands can install them (Windows may ask you to approve installation):
+
+```cmd
+winget install --id Python.Python.3.13 --exact
+winget install --id OpenJS.NodeJS.LTS --exact
+winget install --id Gyan.FFmpeg.Shared --exact
+```
+
+After installation, **close Command Prompt and open a new one** so Windows reloads `PATH`. Check that all three tools are available:
+
+```cmd
+py -3.13 --version
+node --version
+npm --version
+ffmpeg -version
+```
+
+If `ffmpeg -version` is not recognized, Windows cannot find FFmpeg on `PATH` even if winget reports that it is installed. Run `where.exe ffmpeg`; if that finds nothing, locate `ffmpeg.exe` in the FFmpeg package's installation folder and add the folder containing it to your Windows `Path`, then open a new Command Prompt and retry.
+
+From the repository root, create the Python environment and install backend dependencies:
+
+```cmd
+cd /d C:\Users\Royal\Projects\VideoMind
 py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.venv\Scripts\activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-The virtual environment must remain at the project root. Do not install project dependencies into the global Python installation or inside `backend`.
+If you cloned the repository somewhere else, replace the example path with your checkout's path.
 
-If PowerShell blocks activation for the current user, open PowerShell as the current user and run the appropriate policy command allowed by your organization, or invoke the interpreter directly:
+The virtual environment must remain at the project root. Do not install project dependencies globally or inside `backend`.
 
-```powershell
-.\.venv\Scripts\python.exe --version
+Install the frontend dependencies from the lockfile:
+
+```cmd
+cd frontend
+npm ci
 ```
 
-## FFmpeg
+If you already created `.venv` before the PyAV constraint was added, installing `requirements.txt` again will select a compatible PyAV version. To fix only PyAV in that environment, run `python -m pip install "av>=11,<17"` with the environment activated.
 
-FFmpeg is required for media processing and is not currently available on this machine's `PATH`. One Windows installation option is:
-
-```powershell
-winget install Gyan.FFmpeg.Shared
-ffmpeg -version
-```
-
-Restart the terminal after installation if `ffmpeg` is not immediately found. The application will report a useful configuration error when FFmpeg is unavailable.
+ASR and embedding models may download the first time you process a video. Set `GROQ_API_KEY` in your local, untracked `.env` for summarization and question answering.
 
 ## Environment Variables
 
@@ -92,10 +110,11 @@ The application loads environment variables with `python-dotenv`. ASR, upload li
 
 ## Running the Backend
 
-Start the backend with:
+Open a Command Prompt at the repository root and start the backend:
 
-```powershell
-.\.venv\Scripts\Activate.ps1
+```cmd
+cd /d C:\Users\Royal\Projects\VideoMind
+.venv\Scripts\activate
 uvicorn backend.app.main:app --reload
 ```
 
@@ -151,17 +170,16 @@ Persistent chat history is the complete ordered conversation and survives backen
 
 ## Running the Frontend
 
-From the project root in PowerShell:
+Open a **second Command Prompt** and start the frontend:
 
-```powershell
-Set-Location frontend
-npm install
+```cmd
+cd /d C:\Users\Royal\Projects\VideoMind\frontend
 npm run dev
 ```
 
 The Vite development server runs at `http://localhost:5173` and proxies `/api` requests to the backend at `http://127.0.0.1:8000`. Start the backend separately before registering or signing in, and before using upload, YouTube processing, transcript, summary, or question workflows. Create an account from the login screen, or sign in with an existing account; the session survives page refreshes until logout, backend restart, or its 12-hour expiry.
 
-The Python virtual environment installs backend dependencies from `requirements.txt`. Frontend dependencies cannot be installed into that environment because React and Vite are Node/npm packages. Install them once with `npm install` inside `frontend`; validate the production bundle with `npm run build`.
+The Python virtual environment installs backend dependencies from `requirements.txt`. Frontend dependencies cannot be installed into that environment because React and Vite are Node/npm packages. Install them with `npm ci` inside `frontend`; validate the production bundle with `npm run build`.
 
 ### Frontend Themes
 

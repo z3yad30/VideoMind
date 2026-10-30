@@ -83,22 +83,22 @@ Runtime data is below `data/`: `videos/` (including `.owners.json`), `audio/`, `
 
 ## Setup and Verification
 
-From the repository root in PowerShell:
+From **Command Prompt (cmd.exe)** at the repository root:
 
-```powershell
+```cmd
 py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.venv\Scripts\activate
 python -m pip install -r requirements.txt
-Set-Location frontend
-npm install
+cd frontend
+npm ci
 npm run build
-Set-Location ..
+cd ..
 python -m pytest
 ```
 
-Set `GROQ_API_KEY` in the untracked local `.env`. FFmpeg is required for processing. ASR and embedding models may download on first use; local TTS requires a usable Windows SAPI voice. Tests mock external services and do not require a Groq credential.
+Install Node.js and FFmpeg separately from Python packages. Check `node --version`, `npm --version`, and `ffmpeg -version` in a new terminal; if FFmpeg is not found, add its executable folder to Windows `PATH`. Set `GROQ_API_KEY` in the untracked local `.env`. ASR and embedding models may download on first use; local TTS requires a usable Windows SAPI voice. Tests mock external services and do not require a Groq credential.
 
-Start the backend from the project root with `uvicorn backend.app.main:app --reload`. Start Vite from `frontend/` with `npm run dev`; the configured `/api` proxy targets `http://127.0.0.1:8000`.
+Start the backend from the repository root with `.venv\Scripts\activate` followed by `uvicorn backend.app.main:app --reload`. In a second terminal, start Vite from `frontend\` with `npm run dev`; the configured `/api` proxy targets `http://127.0.0.1:8000`.
 
 ## Known Limitations
 
