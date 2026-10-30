@@ -1,5 +1,6 @@
 from fastapi import HTTPException, Request, status
 
+from backend.app.core.log_context import user_id_var
 from backend.app.services.auth import AuthenticatedUser, auth_service
 from backend.app.services.user_storage import UserStoreError
 
@@ -19,4 +20,5 @@ def get_current_user(request: Request) -> AuthenticatedUser:
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Cookie"},
         )
+    user_id_var.set(user.id)
     return user

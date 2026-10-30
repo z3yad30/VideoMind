@@ -11,8 +11,9 @@ SESSION_TTL_SECONDS = 12 * 60 * 60
 
 
 class AuthenticatedUser:
-    def __init__(self, username: str) -> None:
+    def __init__(self, username: str, user_id: str | None = None) -> None:
         self.username = username
+        self.id = user_id
 
 
 class AuthenticationService:
@@ -37,7 +38,7 @@ class AuthenticationService:
             verified = False
         if record is None or not verified:
             return None
-        return AuthenticatedUser(record["username"])
+        return AuthenticatedUser(record["username"], record["id"])
 
     def create_session(self, user: AuthenticatedUser) -> str:
         session_id = secrets.token_urlsafe(32)
@@ -48,8 +49,8 @@ class AuthenticationService:
     def get_session_user(self, session_id: str | None) -> AuthenticatedUser | None:
         if not session_id:
             return None
-        username = self.user_store.get_session_user(session_id, datetime.now(timezone.utc))
-        return AuthenticatedUser(username) if username else None
+        user = self.user_store.get_session_user(session_id, datetime.now(timezone.utc))
+        return AuthenticatedUser(user["username"], user["id"]) if user else None
 
     def invalidate_session(self, session_id: str | None) -> None:
         if session_id:

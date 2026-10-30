@@ -6,6 +6,7 @@ import threading
 from uuid import uuid4
 
 from backend.app.core.config import settings
+from backend.app.core.log_context import job_id_var, user_id_var, video_id_var
 from backend.app.ports import JobQueue, JobRecord
 from backend.app.services.video_processing import VideoProcessingService
 
@@ -69,6 +70,9 @@ class WorkerRunner:
                 self._stop.wait(self.poll_interval_seconds)
 
     def _run_claimed(self, job: JobRecord, claim_id: str) -> None:
+        user_token = user_id_var.set(job.user_id)
+        video_token = video_id_var.set(job.video_id)
+        job_token = job_id_var.set(job.id)
         stopped = threading.Event()
         heartbeat = threading.Thread(
             target=self._heartbeat_loop,
@@ -86,16 +90,27 @@ class WorkerRunner:
         finally:
             stopped.set()
             heartbeat.join()
+            job_id_var.reset(job_token)
+            video_id_var.reset(video_token)
+            user_id_var.reset(user_token)
 
     def _heartbeat_loop(self, job: JobRecord, claim_id: str, stopped: threading.Event) -> None:
+        user_token = user_id_var.set(job.user_id)
+        video_token = video_id_var.set(job.video_id)
+        job_token = job_id_var.set(job.id)
         interval = max(1.0, min(15.0, self.stale_after_seconds / 3))
-        while not stopped.wait(interval):
-            try:
-                if not self.job_queue.heartbeat(job.id, claim_id):
-                    logger.warning("Worker lost ownership of job %s", job.id)
-                    return
-            except Exception:
-                logger.exception("Heartbeat failed for video %s", job.video_id)
+        try:
+            while not stopped.wait(interval):
+                try:
+                    if not self.job_queue.heartbeat(job.id, claim_id):
+                        logger.warning("Worker lost ownership of job %s", job.id)
+                        return
+                except Exception:
+                    logger.exception("Heartbeat failed for video %s", job.video_id)
+        finally:
+            job_id_var.reset(job_token)
+            video_id_var.reset(video_token)
+            user_id_var.reset(user_token)
 
 
 def main() -> None:

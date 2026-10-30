@@ -1,11 +1,13 @@
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from backend.app.core.log_context import job_id_var, user_id_var, video_id_var
 from backend.app.ports import BlobStore, JobQueue, JobRecord, Segment, Transcriber
 from backend.app.services.media import MediaProcessingError, MediaService, temporary_directory
 from backend.app.services.llm import VideoAIService
@@ -120,6 +122,10 @@ class VideoProcessingService:
         media_path = media_path or self._find_source(artifact_id, required=False, blob_key=job.blob_key)
         source_url = source_url or job.source_url
         active_stage = "validating"
+        active_started_at: float | None = None
+        video_id_var.set(video_id)
+        job_id_var.set(job.id)
+        user_id_var.set(job.user_id)
         try:
             checkpoint_index = self._stage_index(job.stage)
 
@@ -131,7 +137,9 @@ class VideoProcessingService:
                 skip_message: str | None = None,
             ) -> None:
                 nonlocal active_stage
+                nonlocal active_started_at
                 active_stage = stage_id
+                active_started_at = None
                 if self._stage_index(stage_id) <= checkpoint_index:
                     return
                 if output_key and self.blob_store.exists(output_key):
@@ -142,15 +150,30 @@ class VideoProcessingService:
                         f"{message} (already available)",
                         worker_id=worker_id,
                         job_id=job.id,
+                        duration_ms=0,
                     )
                     return
                 if skip_message is not None:
-                    self._stage(video_id, stage_id, "skipped", skip_message, worker_id=worker_id, job_id=job.id)
+                    self._stage(
+                        video_id, stage_id, "skipped", skip_message,
+                        worker_id=worker_id, job_id=job.id, duration_ms=0,
+                    )
                     return
                 self._stage(video_id, stage_id, "running", message, worker_id=worker_id, job_id=job.id)
+                active_started_at = time.perf_counter()
                 if action is not None:
                     action()
-                self._stage(video_id, stage_id, "completed", message, worker_id=worker_id, job_id=job.id)
+                duration_ms = round((time.perf_counter() - active_started_at) * 1000)
+                self._stage(
+                    video_id,
+                    stage_id,
+                    "completed",
+                    message,
+                    worker_id=worker_id,
+                    job_id=job.id,
+                    duration_ms=duration_ms,
+                )
+                active_started_at = None
 
             execute_stage(
                 "validating",
@@ -296,10 +319,28 @@ class VideoProcessingService:
             if not self.job_queue.complete(job.id, worker_id):
                 raise RuntimeError("Worker no longer owns this video job")
         except Exception as exc:
-            logger.exception("Video processing failed for %s", video_id)
-            self._stage(video_id, active_stage, "failed", "Processing failed", str(exc), worker_id, job.id)
+            logger.exception("Video processing failed")
+            duration_ms = (
+                round((time.perf_counter() - active_started_at) * 1000)
+                if active_started_at is not None
+                else None
+            )
+            self._stage(
+                video_id,
+                active_stage,
+                "failed",
+                "Processing failed",
+                str(exc),
+                worker_id,
+                job.id,
+                duration_ms,
+            )
             if not self.job_queue.fail(job.id, worker_id, str(exc)):
                 logger.warning("Could not mark lost-owned job %s as failed", job.id)
+        finally:
+            user_id_var.set(None)
+            video_id_var.set(None)
+            job_id_var.set(None)
 
     def get_transcript(self, video_id: str) -> list[dict[str, object]] | None:
         key = f"transcripts/{video_id}.json"
@@ -376,6 +417,7 @@ class VideoProcessingService:
         detail: str | None = None,
         worker_id: str | None = None,
         job_id: str | None = None,
+        duration_ms: int | None = None,
     ) -> None:
         event_type = "stage_failed" if status == "failed" else (
             "stage_started" if status == "running" else "stage_completed"
@@ -389,6 +431,13 @@ class VideoProcessingService:
             detail,
         )
         payload["event"] = event_type
+        if duration_ms is not None:
+            payload["duration_ms"] = duration_ms
+        if duration_ms is not None and status in {"completed", "failed", "skipped"}:
+            logger.info(
+                "Video processing stage finished",
+                extra={"duration_ms": duration_ms, "stage": stage_id, "stage_status": status},
+            )
         if worker_id and job_id:
             if status in {"completed", "skipped"}:
                 if not self.job_queue.record_checkpoint(job_id, worker_id, stage_id, event_type, payload):

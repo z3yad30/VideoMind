@@ -38,7 +38,7 @@ class UserStore:
         except UserRepositoryError as exc:
             raise UserStoreError("User storage is unavailable") from exc
 
-    def get_session_user(self, session_id: str, now: datetime | None = None) -> str | None:
+    def get_session_user(self, session_id: str, now: datetime | None = None) -> dict[str, str] | None:
         try:
             return self.repository.get_session_user(session_id, now)
         except UserRepositoryError as exc:

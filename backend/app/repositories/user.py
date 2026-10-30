@@ -57,7 +57,7 @@ class UserRepo:
         except SQLAlchemyError as exc:
             raise UserRepositoryError from exc
 
-    def get_session_user(self, session_id: str, now: datetime | None = None) -> str | None:
+    def get_session_user(self, session_id: str, now: datetime | None = None) -> dict[str, str] | None:
         digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
         current_time = now or datetime.now(timezone.utc)
         try:
@@ -72,7 +72,7 @@ class UserRepo:
                     session.delete(record)
                     return None
                 user = session.get(User, record.user_id)
-                return user.username if user else None
+                return {"id": user.id, "username": user.username} if user else None
         except SQLAlchemyError as exc:
             raise UserRepositoryError from exc
 

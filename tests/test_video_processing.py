@@ -96,6 +96,10 @@ def test_processing_emits_stage_events(tmp_path: Path) -> None:
         events = service.get_events(video_id)
         assert any(event["event"] == "stage_started" and event["stage"] == "transcribing" for event in events)
         assert any(event["event"] == "stage_completed" and event["stage"] == "transcribing" for event in events)
+        assert any(
+            event["event"] == "stage_completed" and isinstance(event.get("duration_ms"), int)
+            for event in events
+        )
         assert events[-1]["event"] == "processing_completed"
     finally:
         (tmp_path / "data" / "transcripts" / f"{video_id}.json").unlink(missing_ok=True)

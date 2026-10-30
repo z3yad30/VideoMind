@@ -65,6 +65,7 @@ class JobRecord:
     source_url: str | None
     asset_id: str | None = None
     blob_key: str | None = None
+    user_id: str | None = None
 
 
 @dataclass(frozen=True)

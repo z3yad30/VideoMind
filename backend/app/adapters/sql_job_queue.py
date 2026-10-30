@@ -349,4 +349,5 @@ class SqlJobQueue:
             source_url=video.source_url,
             asset_id=video.asset_id,
             blob_key=video.asset.blob_key if video.asset is not None else None,
+            user_id=video.user_id,
         )

@@ -1,5 +1,4 @@
 import json
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,7 +33,7 @@ def test_alembic_upgrade_creates_schema_on_temporary_database(
     monkeypatch.setattr(
         config_module,
         "settings",
-        replace(config_module.settings, database_url=sqlite_url(database_path)),
+        config_module.settings.model_copy(update={"database_url": sqlite_url(database_path)}),
     )
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     config.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "backend" / "migrations"))

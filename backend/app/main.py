@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import re
+from uuid import uuid4
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -13,6 +15,7 @@ from backend.app.api.videos import router as videos_router
 from backend.app.core.config import settings
 from backend.app.core.logging_config import configure_logging
 from backend.app.core.csrf import is_allowed_request_origin
+from backend.app.core.log_context import clear_log_context, request_id_var
 from backend.app.container import get_container
 from backend.app.services.auth import auth_service
 from backend.app.services.user_storage import UserStoreError
@@ -55,12 +58,22 @@ app = FastAPI(title="AI Video Assistant", version="0.1.0", lifespan=lifespan)
 
 
 @app.middleware("http")
-async def enforce_csrf_origin(request: Request, call_next):
-    if request.method in {"POST", "PUT", "DELETE"} and not is_allowed_request_origin(
-        request.headers.get("origin"), request.headers.get("referer")
-    ):
-        return JSONResponse(status_code=403, content={"detail": "Request origin is not allowed"})
-    return await call_next(request)
+async def request_context_and_csrf(request: Request, call_next):
+    supplied_request_id = request.headers.get("x-request-id", "")
+    request_id = supplied_request_id if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", supplied_request_id) else uuid4().hex
+    clear_log_context()
+    request_id_var.set(request_id)
+    try:
+        if request.method in {"POST", "PUT", "DELETE"} and not is_allowed_request_origin(
+            request.headers.get("origin"), request.headers.get("referer")
+        ):
+            response = JSONResponse(status_code=403, content={"detail": "Request origin is not allowed"})
+        else:
+            response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        clear_log_context()
 
 
 app.include_router(auth_router)
