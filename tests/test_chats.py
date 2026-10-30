@@ -1,28 +1,37 @@
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 import backend.app.api.auth as auth_api
 import backend.app.api.chats as chats_api
 import backend.app.api.dependencies as auth_dependencies
 from backend.app.main import app
 from backend.app.container import get_ai_service, get_blob_store, get_video_processing_service, get_voice_service
+from backend.app.db.models import Chat as ChatModel, Message as MessageModel, MessageSource
+from backend.app.repositories.chat import ChatRepo
+from backend.app.repositories.user import UserRepo
+from backend.app.repositories.video import VideoRepo
 from backend.app.services.auth import AuthenticationService
 from backend.app.services.chat_storage import ChatStore
+from backend.app.schemas.chats import ChatCreate, ChatMessage
 from backend.app.services.user_storage import UserStore
 from backend.app.services.video_storage import VideoOwnershipStore
 from tests.fakes import FakeBlobStore
+from tests.database import create_database
 
 
 @pytest.fixture
 def isolated_services(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ChatStore:
-    auth_service = AuthenticationService(UserStore(tmp_path / "users" / "users.json"))
-    chat_service = ChatStore(tmp_path / "data" / "chats")
-    video_service = VideoOwnershipStore(tmp_path / "data" / "videos")
+    database = create_database(tmp_path)
+    auth_service = AuthenticationService(UserStore(UserRepo(database.session_factory)))
+    chat_service = ChatStore(ChatRepo(database.session_factory), data_root=tmp_path / "data")
+    video_service = VideoOwnershipStore(VideoRepo(database.session_factory))
     monkeypatch.setattr(auth_api, "auth_service", auth_service)
     monkeypatch.setattr(auth_dependencies, "auth_service", auth_service)
     monkeypatch.setattr(chats_api, "chat_store", chat_service)
@@ -35,7 +44,9 @@ def isolated_services(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ChatSt
     monkeypatch.setitem(app.dependency_overrides, get_ai_service, lambda: object())
     monkeypatch.setitem(app.dependency_overrides, get_voice_service, lambda: object())
     monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: FakeBlobStore(tmp_path / "data"))
-    return chat_service
+    chat_service.database = database
+    yield chat_service
+    database.dispose()
 
 
 async def register_and_login(client: AsyncClient, username: str) -> None:
@@ -74,7 +85,55 @@ async def test_chat_crud_and_list(isolated_services: ChatStore) -> None:
     assert retrieved.json()["messages"][1]["answer_audio_ref"] is None
     assert deleted.status_code == 204
     assert missing.status_code == 404
-    assert list((isolated_services.root / "alice").glob("*.json")) == []
+    assert isolated_services.list_for_user("alice") == []
+
+
+def test_chat_delete_cascades_to_messages_and_sources(isolated_services: ChatStore) -> None:
+    UserRepo(isolated_services.repository.session_factory).create("alice", "test-hash")
+    chat = isolated_services.create(
+        "alice",
+        ChatCreate(
+            messages=[
+                ChatMessage(
+                    id="assistant-message",
+                    role="assistant",
+                    content="Answer",
+                    sources=[{"text": "source", "start": 1.0, "end": 2.0}],
+                )
+            ]
+        ),
+    )
+
+    with isolated_services.repository.session_factory() as session:
+        assert session.scalar(select(MessageModel.id).where(MessageModel.chat_id == chat.chat_id)) == "assistant-message"
+        assert session.scalar(select(MessageSource.id).where(MessageSource.message_id == "assistant-message"))
+
+    isolated_services.delete("alice", chat.chat_id)
+
+    with isolated_services.repository.session_factory() as session:
+        assert session.get(ChatModel, chat.chat_id) is None
+        assert session.get(MessageModel, "assistant-message") is None
+        assert session.scalar(select(MessageSource.id).where(MessageSource.message_id == "assistant-message")) is None
+
+
+def test_concurrent_chat_appends_do_not_lose_messages(isolated_services: ChatStore) -> None:
+    user_repo = UserRepo(isolated_services.repository.session_factory)
+    user_repo.create("thread-user", "test-hash")
+    chat = isolated_services.create("thread-user", ChatCreate())
+
+    def append(index: int) -> None:
+        isolated_services.append_message(
+            "thread-user",
+            chat.chat_id,
+            ChatMessage(id=f"message-{index}", role="user", content=f"Question {index}"),
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(append, range(16)))
+
+    record = isolated_services.get("thread-user", chat.chat_id)
+    assert len(record.messages) == 16
+    assert {message.id for message in record.messages} == {f"message-{index}" for index in range(16)}
 
 
 @pytest.mark.asyncio
@@ -86,11 +145,10 @@ async def test_chat_persists_after_store_reload(isolated_services: ChatStore) ->
         created = await client.post("/chats", json={"video_id": video_id, "messages": [{"role": "assistant", "content": "Saved reply"}]})
         chat_id = created.json()["chat_id"]
 
-    reloaded_store = ChatStore(isolated_services.root)
+    reloaded_store = ChatStore(isolated_services.repository, data_root=isolated_services.data_root)
     record = reloaded_store.get("alice", chat_id)
     assert record.messages[0].content == "Saved reply"
-    stored_file = isolated_services.root / "alice" / f"{chat_id}.json"
-    assert json.loads(stored_file.read_text(encoding="utf-8"))["username"] == "alice"
+    assert reloaded_store.get("alice", chat_id).messages[0].content == "Saved reply"
 
 
 @pytest.mark.asyncio
@@ -149,7 +207,7 @@ async def test_chat_question_persists_both_messages_sources_audio_and_reload(
         {"role": "user", "content": "Prior question 3"},
         {"role": "user", "content": "Prior question 4"},
     ])
-    reloaded = ChatStore(isolated_services.root).get("alice", chat_id)
+    reloaded = ChatStore(isolated_services.repository, data_root=isolated_services.data_root).get("alice", chat_id)
     assert reloaded.messages[-1].sources[0].start == 4.0
     assert reloaded.messages[-1].answer_audio_ref == expected_audio_ref
 
@@ -252,8 +310,10 @@ async def test_chat_detail_restores_canonical_video_context(isolated_services: C
 
     assert restored.json()["summary"] == {"Overview": "A summary"}
     assert restored.json()["transcript"]["segments"][0]["text"] == "Transcript"
-    saved = json.loads((isolated_services.root / "alice" / f"{created.json()['chat_id']}.json").read_text(encoding="utf-8"))
-    assert saved["transcript"] is None
+    stored = isolated_services.repository.session_factory
+    with stored() as session:
+        chat = session.get(ChatModel, created.json()["chat_id"])
+        assert chat.transcript is None
 
 
 @pytest.mark.asyncio
@@ -320,14 +380,13 @@ async def test_users_cannot_attach_another_users_video_to_their_chat(isolated_se
 
 
 @pytest.mark.asyncio
-async def test_malformed_chat_json_returns_service_unavailable(isolated_services: ChatStore) -> None:
-    chat_id = uuid4().hex
-    user_dir = isolated_services.root / "alice"
-    user_dir.mkdir(parents=True)
-    (user_dir / f"{chat_id}.json").write_text("{broken", encoding="utf-8")
+async def test_database_failure_returns_service_unavailable(isolated_services: ChatStore) -> None:
+    database = isolated_services.database
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE chats")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await register_and_login(client, "alice")
-        response = await client.get("/chats/" + chat_id)
+        response = await client.get("/chats")
 
     assert response.status_code == 503
     assert "data" not in response.text

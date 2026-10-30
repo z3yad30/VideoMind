@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from backend.app.main import app
 from backend.app.api.dependencies import get_current_user
 from backend.app.container import get_video_processing_service, get_voice_service
+from backend.app.repositories.video import VideoRepo
 from backend.app.services.auth import AuthenticatedUser
 from backend.app.services.asr import ASRSegment
 from backend.app.services.llm import SUMMARY_FIELDS, VideoAIService
@@ -16,6 +17,7 @@ from backend.app.services.voice import VoiceQuestionService
 import backend.app.api.videos as videos_api
 from backend.app.services.video_storage import VideoOwnershipStore
 from tests.fakes import FakeBlobStore, FakeTTS
+from tests.database import create_database, seed_user
 
 
 class FakeASR:
@@ -42,7 +44,9 @@ class FakeAI:
 @pytest.mark.asyncio
 async def test_voice_question_runs_asr_rag_and_tts_without_indexing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     video_id = "a" * 32
-    ownership = VideoOwnershipStore(tmp_path / "videos")
+    database = create_database(tmp_path)
+    seed_user(database, "alice")
+    ownership = VideoOwnershipStore(VideoRepo(database.session_factory))
     ownership.register(video_id, "alice")
     monkeypatch.setattr(videos_api, "video_ownership", ownership)
     monkeypatch.setitem(app.dependency_overrides, get_current_user, lambda: AuthenticatedUser("alice"))
@@ -71,6 +75,7 @@ async def test_voice_question_runs_asr_rag_and_tts_without_indexing(monkeypatch:
     assert response.json()["audio_answer_location"].startswith(f"/videos/{video_id}/answers/")
     assert ai.questions == [(video_id, "What happened next?")]
     assert len(tts.calls) == 1
+    database.dispose()
 
 
 def test_summary_is_synthesized_with_replaceable_tts(tmp_path: Path) -> None:

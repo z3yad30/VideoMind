@@ -11,6 +11,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 @dataclass(frozen=True)
 class Settings:
     project_root: Path = PROJECT_ROOT
+    database_url: str = os.getenv("DATABASE_URL", "sqlite:///data/videomind.db")
+    sqlite_busy_timeout_ms: int = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000"))
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
     groq_model: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")

@@ -85,13 +85,34 @@ def clear_runtime_data(project_root: Path | str | None = None, target: Path | st
         if runtime_dir.resolve(strict=False).parent != expected_data_dir:
             raise VanishError(f"Unsafe runtime data directory: {runtime_dir} is outside {expected_data_dir}.")
 
+    database_files = sorted(expected_data_dir.glob("videomind.db*"))
+    if any(path.is_symlink() or not path.is_file() for path in database_files):
+        raise VanishError("Unsafe database cleanup target: expected regular files matching data/videomind.db*.")
+
     for directory_name in RUNTIME_DATA_DIRECTORIES:
         runtime_dir = expected_data_dir / directory_name
         runtime_dir.mkdir(parents=True, exist_ok=True)
         cleared = _clear_directory_contents(runtime_dir)
         print(f"Vanish: cleared {cleared} item(s) from data/{directory_name}/")
 
-    print(f"Vanish: completed; preserved data/ and all seven allowlisted directories under {expected_data_dir}")
+    for path in database_files:
+        path.unlink()
+    if database_files:
+        print(f"Vanish: removed {len(database_files)} SQLite database file(s)")
+
+    root_text = str(root)
+    if root_text not in sys.path:
+        sys.path.insert(0, root_text)
+    from backend.app.db.database import Database
+
+    database_path = expected_data_dir / "videomind.db"
+    database = Database(f"sqlite:///{database_path.as_posix()}")
+    try:
+        database.create_schema()
+    finally:
+        database.dispose()
+
+    print(f"Vanish: completed; preserved data/ and recreated an empty database at {database_path}")
     return expected_data_dir
 
 

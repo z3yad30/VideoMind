@@ -4,7 +4,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy import inspect
 
+from backend.app.db.database import Database
 from scripts.vanish import VanishError, clear_runtime_data, resolve_project_root, resolve_runtime_data_dir
 
 
@@ -127,8 +129,15 @@ def test_standalone_script_execution(project_root: Path) -> None:
     script_dir = project_root / "scripts"
     script_dir.mkdir()
     script_path = script_dir / "vanish.py"
-    source_script = Path(__file__).resolve().parents[1] / "scripts" / "vanish.py"
+    repository_root = Path(__file__).resolve().parents[1]
+    source_script = repository_root / "scripts" / "vanish.py"
     shutil.copyfile(source_script, script_path)
+    shutil.copytree(repository_root / "backend" / "app" / "db", project_root / "backend" / "app" / "db")
+    (project_root / "backend" / "app" / "core").mkdir()
+    shutil.copyfile(
+        repository_root / "backend" / "app" / "core" / "config.py",
+        project_root / "backend" / "app" / "core" / "config.py",
+    )
 
     result = subprocess.run(
         [sys.executable, "scripts/vanish.py"],
@@ -143,7 +152,32 @@ def test_standalone_script_execution(project_root: Path) -> None:
     assert "data/chats/" in result.stdout
     for section in ["videos", "audio", "transcripts", "summaries", "chroma", "users", "chats"]:
         assert list((data_dir / section).iterdir()) == []
+    database = Database(f"sqlite:///{(data_dir / 'videomind.db').as_posix()}")
+    try:
+        assert "users" in inspect(database.engine).get_table_names()
+    finally:
+        database.dispose()
 
 
 def test_resolve_project_root_from_script_location() -> None:
     assert resolve_project_root().name == "VideoMind"
+
+
+def test_vanish_removes_database_files_and_recreates_schema(project_root: Path) -> None:
+    data_dir = resolve_runtime_data_dir(project_root)
+    for suffix in ("", "-wal", "-shm"):
+        (data_dir / f"videomind.db{suffix}").write_bytes(b"old database")
+
+    clear_runtime_data(project_root)
+
+    database_path = data_dir / "videomind.db"
+    assert database_path.is_file()
+    assert not (data_dir / "videomind.db-wal").exists()
+    assert not (data_dir / "videomind.db-shm").exists()
+    database = Database(f"sqlite:///{database_path.as_posix()}")
+    try:
+        assert "users" in inspect(database.engine).get_table_names()
+        with database.engine.connect() as connection:
+            assert connection.exec_driver_sql("SELECT COUNT(*) FROM users").scalar_one() == 0
+    finally:
+        database.dispose()

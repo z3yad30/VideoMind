@@ -2,14 +2,14 @@
 
 VideoMind is a local-first MVP for uploading media or processing an authorized YouTube URL, transcribing it, generating a grounded summary, and answering text or voice questions about that specific video.
 
-The backend and Vite frontend are implemented. The application requires a username/password account to enter the frontend workspace; the backend provides cookie-based sessions and persistent user-owned chats. The current deployment model is a single Windows-hosted process with local filesystem artifacts.
+The backend and Vite frontend are implemented. The application requires a username/password account to enter the frontend workspace; the backend provides cookie-based sessions and persistent user-owned chats. User, session, video ownership, and chat records are stored in a local SQL database; media and derived artifacts remain on the local filesystem. The current deployment model is a single Windows-hosted process.
 
 ## Architecture
 
 The pipeline is:
 
 1. Upload a video/audio file or submit a YouTube URL.
-2. Persist the source under `data/videos/{video_id}{extension}` for both uploads and YouTube downloads, and record its authenticated owner in `data/videos/.owners.json`.
+2. Persist the source under `data/videos/{video_id}{extension}` for both uploads and YouTube downloads, and record its authenticated owner in the local SQL database.
 3. Extract audio with FFmpeg in a temporary working directory.
 4. Transcribe audio with configurable `faster-whisper`.
 5. Persist timestamped transcript segments.
@@ -127,21 +127,38 @@ The backend provides username/password registration, login, session inspection, 
 - `GET /auth/me` returns the authenticated username and responds with `401` when no valid session exists.
 - `POST /auth/logout` invalidates the current session and clears its cookie.
 
-Users are stored in `data/users/users.json`. Passwords are hashed with Argon2 through `pwdlib`; plaintext passwords and password hashes are not returned by the API. User-file updates use an atomic temporary-file replacement, and missing user storage is initialized automatically. Authentication does not use a database or frontend localStorage.
+Users and hashed session identifiers are stored in the SQL database. Passwords are hashed with Argon2 through `pwdlib`; plaintext passwords and password hashes are not returned by the API. The database defaults to `sqlite:///data/videomind.db`; SQLite uses WAL, foreign keys, and a configurable busy timeout. Set `DATABASE_URL` in `.env` to select another SQLAlchemy-supported database URL. User records, sessions, video ownership, and chats are database-backed, while transcript, summary, audio, media, and Chroma data retain their existing filesystem layout.
 
 The frontend opens on a login screen and offers account registration. Registration validates the username and password confirmation, creates the account through `POST /auth/register`, then signs in through `POST /auth/login`. Existing users can sign in directly. Passwords are sent only to the backend over the configured API connection; the frontend does not save passwords in localStorage. After sign-in, the chatbot workspace loads the authenticated user's saved chats from the backend.
 
-On startup, the frontend calls `GET /auth/me` and only mounts the VideoMind workspace when a valid session is returned. Login sets an HTTP-only, SameSite=Lax session cookie that the browser attaches to subsequent API requests, including after a page refresh. Sessions are random server-side identifiers and expire after 12 hours. Session state is in memory, so restarting the backend invalidates all sessions. A protected API `401` returns the frontend to login, and logout calls `POST /auth/logout` to invalidate the session and clear the cookie.
+On startup, the frontend calls `GET /auth/me` and only mounts the VideoMind workspace when a valid session is returned. Login sets an HTTP-only, SameSite=Lax session cookie that the browser attaches to subsequent API requests, including after a page refresh. Sessions are random server-side identifiers and expire after 12 hours; the database stores only a hash of each session identifier. A protected API `401` returns the frontend to login, and logout calls `POST /auth/logout` to invalidate the session and clear the cookie.
 
-Chat and video routes require this authenticated session. Uploaded and YouTube-processed videos are assigned to the authenticated account; ownership is stored in `data/videos/.owners.json`. Video status, SSE events, media, transcript, summary, voice answers, and Q&A all check ownership. Chats can only reference videos owned by the current user. Chat answer audio is separately checked against the owning chat and assistant message. Unknown and foreign resource IDs return `404`.
+Chat and video routes require this authenticated session. Uploaded and YouTube-processed videos are assigned to the authenticated account in the database. Video status, SSE events, media, transcript, summary, voice answers, and Q&A all check ownership. Chats can only reference videos owned by the current user. Chat answer audio is separately checked against the owning chat and assistant message. Unknown and foreign resource IDs return `404`.
 
-The browser session survives page refreshes through the HTTP-only cookie, but session records are in memory and are invalidated when the backend restarts; the cookie expires after 12 hours. The cookie is configured for local HTTP rather than HTTPS. There is no rate limiting, CSRF token, durable job queue, or multi-worker shared job state. Do not expose this local MVP to the public internet as-is. Video artifacts created before video ownership tracking have no trustworthy owner record and are intentionally inaccessible until they are reprocessed under an account; do not auto-assign legacy artifacts in a multi-account installation.
+The browser session survives page refreshes through the HTTP-only cookie and persistent session records; the cookie expires after 12 hours. The cookie is configured for local HTTP rather than HTTPS. There is no rate limiting, CSRF token, durable job queue, or multi-worker shared job state. Do not expose this local MVP to the public internet as-is. Video artifacts without an ownership record are intentionally inaccessible until assigned through a trusted migration or reprocessed under an account; do not auto-assign legacy artifacts in a multi-account installation.
+
+## Database Setup and Legacy Import
+
+The database schema is managed by Alembic. After installing the Python requirements, initialize or upgrade it from the repository root:
+
+```cmd
+python -m alembic upgrade head
+```
+
+For an existing installation with JSON users, chats, or `data/videos/.owners.json`, first run the migration in validation-only mode, then import:
+
+```cmd
+python scripts/migrate_json_to_db.py --dry-run
+python scripts/migrate_json_to_db.py
+```
+
+The importer is idempotent and leaves source JSON files unchanged. Keep a backup of runtime data before importing. New installations can skip the importer. `DATABASE_URL` defaults to `sqlite:///data/videomind.db`; `SQLITE_BUSY_TIMEOUT_MS` controls SQLite's busy timeout.
 
 ## Persistent Chat Storage
 
-Chats are stored independently as JSON files under `data/chats/{username}/{chat_id}.json`. The API creates directories automatically and uses atomic replacement when updating a file. A chat record contains its ID and owner, title, creation/update timestamps, optional owned video ID and metadata, summary/transcript fields, and the complete ordered message history. Messages preserve IDs, roles, content, timestamps, and optional assistant sources, evidence timestamps, and answer-audio references.
+Chats, messages, and message sources are stored in the SQL database. A chat record contains its ID and owner, title, creation/update timestamps, optional owned video ID and metadata, summary/transcript fields, and the complete ordered message history. Message/source rows cascade when a chat is deleted.
 
-When an associated video has canonical artifacts, chat detail responses restore summary data from `data/summaries/{video_id}.json` and transcript data from `data/transcripts/{video_id}.json`, after ownership is checked. These potentially large artifacts are referenced through the video ID rather than copied into every chat file unless explicitly supplied in chat content. Files remain scoped to the authenticated username; client-provided usernames are rejected as identity, and unknown or foreign chat/video IDs return `404`. Chat IDs are server-generated 32-character lowercase hexadecimal identifiers and path-like IDs are rejected. Malformed chat JSON fails closed with `503` without returning filesystem paths.
+When an associated video has canonical artifacts, chat detail responses restore summary data from `data/summaries/{video_id}.json` and transcript data from `data/transcripts/{video_id}.json`, after ownership is checked. These potentially large artifacts are referenced through the video ID rather than copied into every chat unless explicitly supplied in chat content. Client-provided usernames are rejected as identity, and unknown or foreign chat/video IDs return `404`. Chat IDs are server-generated 32-character lowercase hexadecimal identifiers and path-like IDs are rejected.
 
 Chat API (all endpoints require the HTTP-only authenticated session cookie):
 
@@ -189,7 +206,7 @@ The frontend supports two themes: **Dark Modern** (the default) and **Solarized 
 
 The authenticated frontend is a chatbot-style workspace. On desktop, a persistent sidebar sits beside a full-height conversation; on smaller screens, the sidebar opens as a drawer. The sidebar contains **New video**, **New chat**, the current video's **Summary**, **Video**, and **Transcript** views, the authenticated user's saved chat list (title and last-updated date), and account/theme controls including **Log out**.
 
-Selecting a saved chat loads its full chronological message history and video ID through `GET /chats/{chat_id}`. The chat's summary and transcript are restored from that response, while processing status and canonical artifacts are refreshed through the existing video endpoints. Messages are rendered distinctly by role; the question composer stays at the bottom and disables submission while a reply is being generated. Chat history remains backend-owned JSON data and is not mirrored into browser localStorage.
+Selecting a saved chat loads its full chronological message history and video ID through `GET /chats/{chat_id}`. The chat's summary and transcript are restored from that response, while processing status and canonical artifacts are refreshed through the existing video endpoints. Messages are rendered distinctly by role; the question composer stays at the bottom and disables submission while a reply is being generated. Chat history remains backend-owned SQL data and is not mirrored into browser localStorage.
 
 **New video** opens the existing upload or YouTube ingestion workflow. When processing completes, the frontend creates and opens a chat associated with the resulting video ID. **New chat** creates an empty chat linked to the currently selected, already-processed video; it does not upload or download that video again. The Summary, Video, and Transcript sidebar views use the context restored for the selected chat.
 
@@ -221,7 +238,7 @@ This standalone command targets only these explicitly allowlisted runtime direct
 - `data/users/`
 - `data/chats/`
 
-Vanish clears video-processing artifacts and authentication, user, and chat runtime data, including registered account records and persistent chat histories. It preserves `data/` and all seven allowlisted directories so the application can regenerate them cleanly.
+Vanish clears video-processing artifacts and authentication, user, and chat runtime data, including registered account records and persistent chat histories. It removes `data/videomind.db*` (including SQLite sidecar files) and recreates an empty schema, while preserving `data/` and all seven allowlisted directories.
 
 ### What Vanish preserves
 
@@ -353,6 +370,6 @@ The current suite verifies retrieval thresholds, raw transcript fallback, voice 
 
 Uploads and YouTube URLs start background processing and return a generated `video_id`. The original source remains in `data/videos/`; extracted audio uses a temporary working directory. Processing stages and replayable SSE events are process-local. On completion, the frontend loads saved playback, transcript, and summary context and creates a persistent chat. New chat creates another chat for the selected video and does not redownload or reprocess it.
 
-Persistent chat JSON contains the complete conversation. Groq receives only the latest three prior user/assistant messages for chat continuity, plus the selected video's retrieved evidence or bounded raw-transcript fallback. Transcript evidence is video-scoped, threshold-filtered, timestamped, and exposed as collapsed per-answer sources in the UI.
+Persistent chat records contain the complete conversation. Groq receives only the latest three prior user/assistant messages for chat continuity, plus the selected video's retrieved evidence or bounded raw-transcript fallback. Transcript evidence is video-scoped, threshold-filtered, timestamped, and exposed as collapsed per-answer sources in the UI.
 
-Vanish clears the video directory, including `.owners.json`, along with the other documented allowlisted runtime data. It leaves project files and caches outside that allowlist untouched.
+Vanish clears the documented allowlisted runtime data, removes `data/videomind.db*`, and recreates an empty database schema. It leaves project files and caches outside that allowlist untouched.

@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from backend.app.main import app
 from backend.app.api.dependencies import get_current_user
 from backend.app.container import get_ai_service, get_blob_store, get_media_service, get_video_processing_service
+from backend.app.repositories.video import VideoRepo
 from backend.app.services.auth import AuthenticatedUser
 from backend.app.services.asr import ASRSegment
 from backend.app.services.media import MediaService
@@ -19,15 +20,20 @@ import backend.app.api.videos as videos_api
 import backend.app.services.media as media_module
 from backend.app.services.video_storage import VideoOwnershipStore
 from tests.fakes import FakeBlobStore, FakeTranscriber
+from tests.database import create_database, seed_user
 
 
 @pytest.fixture(autouse=True)
 def authenticated_video_user(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> VideoOwnershipStore:
-    owners = VideoOwnershipStore(tmp_path / "data" / "videos")
+    database = create_database(tmp_path)
+    seed_user(database, "alice")
+    seed_user(database, "bob")
+    owners = VideoOwnershipStore(VideoRepo(database.session_factory))
     monkeypatch.setattr(videos_api, "video_ownership", owners)
     app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser("alice")
     yield owners
     app.dependency_overrides.pop(get_current_user, None)
+    database.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -320,14 +326,16 @@ def test_youtube_request_rejects_non_youtube_hosts() -> None:
 
 def test_video_ownership_persists_and_cannot_be_reassigned(tmp_path: Path) -> None:
     video_id = "e" * 32
-    original = VideoOwnershipStore(tmp_path / "videos")
+    database = create_database(tmp_path)
+    original = VideoOwnershipStore(VideoRepo(database.session_factory))
     original.register(video_id, "alice")
 
-    restored = VideoOwnershipStore(tmp_path / "videos")
+    restored = VideoOwnershipStore(VideoRepo(database.session_factory))
     assert restored.is_owned_by(video_id, "alice")
     assert not restored.is_owned_by(video_id, "bob")
     with pytest.raises(Exception, match="Video ownership is unavailable"):
         restored.register(video_id, "bob")
+    database.dispose()
 
 
 @pytest.mark.asyncio

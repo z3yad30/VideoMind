@@ -50,9 +50,14 @@ def _require_video_owner(video_id: str, user: AuthenticatedUser) -> None:
         raise HTTPException(status_code=404, detail="Video not found")
 
 
-def _register_video_owner(video_id: str, username: str) -> None:
+def _register_video_owner(
+    video_id: str,
+    username: str,
+    source_type: str = "upload",
+    source_url: str | None = None,
+) -> None:
     try:
-        video_ownership.register(video_id, username)
+        video_ownership.register(video_id, username, source_type, source_url)
     except VideoOwnershipError as exc:
         raise HTTPException(status_code=503, detail="Video storage is unavailable") from exc
 
@@ -103,7 +108,7 @@ async def process_youtube(
     video_service: VideoProcessingService = Depends(get_video_processing_service),
 ) -> VideoJobResponse:
     video_id = video_service.create_job()
-    _register_video_owner(video_id, user.username)
+    _register_video_owner(video_id, user.username, "youtube", str(request.url))
     _start_processing(video_service, video_id, Path(), str(request.url))
     return VideoJobResponse(video_id=video_id, status="queued")
 

@@ -1,189 +1,91 @@
 import json
-import os
 from pathlib import Path
-import re
-import tempfile
-from threading import RLock
-from uuid import uuid4
 
 from pydantic import ValidationError
 
 from backend.app.core.config import settings
-from backend.app.schemas.chats import ChatCreate, ChatMessage, ChatRecord, ChatUpdate, utc_now
-
-
-CHAT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
-USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9._-]{1,32}$")
-
-
-class ChatStoreError(Exception):
-    pass
-
-
-class ChatNotFoundError(Exception):
-    pass
-
-
-class InvalidChatIdError(Exception):
-    pass
+from backend.app.db.database import get_database
+from backend.app.repositories.chat import (
+    CHAT_ID_PATTERN,
+    ChatNotFoundError,
+    ChatRepo,
+    ChatRepoError,
+    ChatStoreError,
+    InvalidChatIdError,
+)
+from backend.app.schemas.chats import ChatCreate, ChatMessage, ChatRecord, ChatUpdate
 
 
 class ChatStore:
-    def __init__(self, root: Path | None = None, data_root: Path | None = None) -> None:
-        self.root = root or settings.project_root / "data" / "chats"
-        self.data_root = data_root or self.root.parent
-        self._lock = RLock()
+    def __init__(
+        self,
+        repository: ChatRepo | Path | None = None,
+        data_root: Path | None = None,
+    ) -> None:
+        if isinstance(repository, Path):
+            raise TypeError("ChatStore requires a ChatRepo, not a JSON directory")
+        self.repository = repository or ChatRepo(get_database().session_factory)
+        self.data_root = data_root or settings.project_root / "data"
 
     def create(self, username: str, request: ChatCreate) -> ChatRecord:
-        user_dir = self._user_dir(username)
-        now = utc_now()
-        messages = request.messages
-        title = (request.title or "").strip()
-        if not title:
-            title = next((message.content.strip()[:80] for message in messages if message.role == "user" and message.content.strip()), "New chat")
-        with self._lock:
-            chat_id = uuid4().hex
-            while (user_dir / f"{chat_id}.json").exists():
-                chat_id = uuid4().hex
-            record = ChatRecord(
-                chat_id=chat_id,
-                username=username,
-                title=title,
-                created_at=now,
-                updated_at=now,
-                video_id=request.video_id,
-                video_metadata=request.video_metadata,
-                summary=request.summary,
-                transcript=request.transcript,
-                messages=messages,
-            )
-            self._write(record)
-            return record
+        try:
+            return self.repository.create(username, request)
+        except (ChatNotFoundError, InvalidChatIdError):
+            raise
+        except ChatRepoError as exc:
+            raise ChatStoreError("Chat storage is unavailable") from exc
 
     def list_for_user(self, username: str) -> list[ChatRecord]:
-        user_dir = self._user_dir(username)
-        with self._lock:
-            chats = [self._read(path, username) for path in user_dir.glob("*.json") if CHAT_ID_PATTERN.fullmatch(path.stem)]
-        return sorted(chats, key=lambda chat: chat.updated_at, reverse=True)
+        try:
+            return self.repository.list_for_user(username)
+        except (ChatNotFoundError, InvalidChatIdError):
+            raise
+        except ChatRepoError as exc:
+            raise ChatStoreError("Chat storage is unavailable") from exc
 
     def get(self, username: str, chat_id: str) -> ChatRecord:
-        path = self._chat_path(username, chat_id)
-        with self._lock:
-            record = self._read(path, username)
+        try:
+            record = self.repository.get(username, chat_id)
+        except (ChatNotFoundError, InvalidChatIdError):
+            raise
+        except ChatRepoError as exc:
+            raise ChatStoreError("Chat storage is unavailable") from exc
         return self._load_video_context(record)
 
     def update(self, username: str, chat_id: str, request: ChatUpdate) -> ChatRecord:
-        path = self._chat_path(username, chat_id)
-        changes = request.model_dump(exclude_unset=True)
-        with self._lock:
-            record = self._read(path, username)
-            if "video_id" in changes and changes["video_id"] != record.video_id:
-                changes.setdefault("summary", None)
-                changes.setdefault("transcript", None)
-                changes.setdefault("video_metadata", None)
-            if "title" in changes:
-                changes["title"] = (changes["title"] or "").strip() or "New chat"
-            changes["updated_at"] = utc_now()
-            updated = ChatRecord.model_validate({**record.model_dump(), **changes})
-            self._write(updated)
-        return self._load_video_context(updated)
+        try:
+            record = self.repository.update(username, chat_id, request)
+        except (ChatNotFoundError, InvalidChatIdError):
+            raise
+        except ChatRepoError as exc:
+            raise ChatStoreError("Chat storage is unavailable") from exc
+        return self._load_video_context(record)
 
     def append_message(self, username: str, chat_id: str, message: ChatMessage) -> ChatRecord:
-        path = self._chat_path(username, chat_id)
-        with self._lock:
-            record = self._read(path, username)
-            title = record.title
-            if message.role == "user" and title == "New chat":
-                title = message.content.strip()[:80] or title
-            updated = record.model_copy(update={
-                "title": title,
-                "updated_at": utc_now(),
-                "messages": [*record.messages, message],
-            })
-            self._write(updated)
-        return updated
+        try:
+            return self.repository.append_message(username, chat_id, message)
+        except (ChatNotFoundError, InvalidChatIdError):
+            raise
+        except ChatRepoError as exc:
+            raise ChatStoreError("Chat storage is unavailable") from exc
 
-    def set_message_audio_ref(self, username: str, chat_id: str, message_id: str, audio_ref: str) -> ChatMessage | None:
-        path = self._chat_path(username, chat_id)
-        with self._lock:
-            record = self._read(path, username)
-            messages = list(record.messages)
-            for index, message in enumerate(messages):
-                if message.id == message_id and message.role == "assistant":
-                    messages[index] = message.model_copy(update={"answer_audio_ref": audio_ref})
-                    self._write(record.model_copy(update={"updated_at": utc_now(), "messages": messages}))
-                    return messages[index]
-        return None
+    def set_message_audio_ref(
+        self, username: str, chat_id: str, message_id: str, audio_ref: str
+    ) -> ChatMessage | None:
+        try:
+            return self.repository.set_message_audio_ref(username, chat_id, message_id, audio_ref)
+        except (ChatNotFoundError, InvalidChatIdError):
+            raise
+        except ChatRepoError as exc:
+            raise ChatStoreError("Chat storage is unavailable") from exc
 
     def delete(self, username: str, chat_id: str) -> None:
-        path = self._chat_path(username, chat_id)
-        with self._lock:
-            self._read(path, username)
-            try:
-                path.unlink()
-            except OSError as exc:
-                raise ChatStoreError("Chat storage is unavailable") from exc
-
-    def _user_dir(self, username: str) -> Path:
-        if not USERNAME_PATTERN.fullmatch(username):
-            raise ChatStoreError("Chat storage is unavailable")
         try:
-            if self.root.is_symlink():
-                raise ChatStoreError("Chat storage is unavailable")
-            self.root.mkdir(parents=True, exist_ok=True)
-            root = self.root.resolve()
-            user_dir = self.root / username
-            if user_dir.is_symlink():
-                raise ChatStoreError("Chat storage is unavailable")
-            user_dir.mkdir(parents=True, exist_ok=True)
-            if user_dir.resolve().parent != root:
-                raise ChatStoreError("Chat storage is unavailable")
-            return user_dir
-        except OSError as exc:
+            self.repository.delete(username, chat_id)
+        except (ChatNotFoundError, InvalidChatIdError):
+            raise
+        except ChatRepoError as exc:
             raise ChatStoreError("Chat storage is unavailable") from exc
-
-    def _chat_path(self, username: str, chat_id: str) -> Path:
-        if not CHAT_ID_PATTERN.fullmatch(chat_id):
-            raise InvalidChatIdError
-        return self._user_dir(username) / f"{chat_id}.json"
-
-    def _read(self, path: Path, username: str) -> ChatRecord:
-        if path.is_symlink():
-            raise ChatStoreError("Chat storage is unavailable")
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            record = ChatRecord.model_validate(payload)
-            if record.username != username or path.stem != record.chat_id:
-                raise ValueError("Chat ownership or identifier mismatch")
-            return record
-        except FileNotFoundError as exc:
-            raise ChatNotFoundError from exc
-        except (OSError, UnicodeError, json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
-            raise ChatStoreError("Chat storage is unavailable") from exc
-
-    def _write(self, record: ChatRecord) -> None:
-        path = self._chat_path(record.username, record.chat_id)
-        temporary_name: str | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=path.parent,
-                prefix=f".{record.chat_id}.",
-                suffix=".tmp",
-                delete=False,
-            ) as temporary_file:
-                temporary_name = temporary_file.name
-                json.dump(record.model_dump(mode="json"), temporary_file, ensure_ascii=True, indent=2)
-                temporary_file.write("\n")
-                temporary_file.flush()
-                os.fsync(temporary_file.fileno())
-            os.replace(temporary_name, path)
-        except OSError as exc:
-            raise ChatStoreError("Chat storage is unavailable") from exc
-        finally:
-            if temporary_name is not None:
-                Path(temporary_name).unlink(missing_ok=True)
 
     def _load_video_context(self, record: ChatRecord) -> ChatRecord:
         if not record.video_id:
@@ -193,6 +95,8 @@ class ChatStore:
         return record.model_copy(update={"summary": summary, "transcript": transcript})
 
     def _read_artifact(self, directory: str, video_id: str, key: str | None = None):
+        if not CHAT_ID_PATTERN.fullmatch(video_id):
+            return None
         path = self.data_root / directory / f"{video_id}.json"
         if path.is_symlink():
             return None
@@ -207,4 +111,10 @@ class ChatStore:
 chat_store = ChatStore()
 
 
-__all__ = ["ChatNotFoundError", "ChatStore", "ChatStoreError", "InvalidChatIdError", "chat_store"]
+__all__ = [
+    "ChatNotFoundError",
+    "ChatStore",
+    "ChatStoreError",
+    "InvalidChatIdError",
+    "chat_store",
+]
