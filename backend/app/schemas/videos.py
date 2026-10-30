@@ -51,7 +51,7 @@ class YouTubeRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_youtube_host(cls, value: HttpUrl) -> HttpUrl:
-        if value.host not in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "music.youtube.com"}:
+        if value.host not in {"youtube.com", "www.youtube.com", "youtu.be"}:
             raise ValueError("Only YouTube URLs are supported")
         return value
 

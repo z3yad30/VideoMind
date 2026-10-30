@@ -1,8 +1,12 @@
 import json
+import threading
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from backend.app.ports import Segment
+from backend.app.ports import JobEventRecord, JobRecord, Segment
 
 
 class FakeBlobStore:
@@ -32,6 +36,120 @@ class FakeBlobStore:
 
     def write_transcript(self, video_id: str, segments: list[dict[str, object]]) -> None:
         self.put(f"transcripts/{video_id}.json", json.dumps({"video_id": video_id, "segments": segments}))
+
+
+class FakeJobQueue:
+    def __init__(self) -> None:
+        self.jobs: dict[str, JobRecord] = {}
+        self.events: list[JobEventRecord] = []
+        self._lock = threading.Lock()
+
+    def enqueue(self, video_id: str) -> JobRecord:
+        with self._lock:
+            for job in self.jobs.values():
+                if job.video_id == video_id:
+                    return job
+            now = datetime.now(timezone.utc)
+            job = JobRecord(uuid4().hex, video_id, "queued", None, 0, None, None, None, now, now, "upload", None)
+            self.jobs[job.id] = job
+            return job
+
+    def claim_next(self, worker_id: str) -> JobRecord | None:
+        with self._lock:
+            job = next((item for item in self.jobs.values() if item.state == "queued"), None)
+            return self._claim(job, worker_id) if job else None
+
+    def claim_job(self, job_id: str, worker_id: str) -> JobRecord | None:
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None or job.state != "queued":
+                return None
+            return self._claim(job, worker_id)
+
+    def heartbeat(self, job_id: str, worker_id: str) -> bool:
+        return self._update_owned(job_id, worker_id, locked_at=datetime.now(timezone.utc))
+
+    def checkpoint(self, job_id: str, worker_id: str, stage: str) -> bool:
+        return self._update_owned(job_id, worker_id, stage=stage, locked_at=datetime.now(timezone.utc))
+
+    def record_checkpoint(
+        self,
+        job_id: str,
+        worker_id: str,
+        stage: str,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> bool:
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None or job.state != "running" or job.locked_by != worker_id:
+                return False
+            self.jobs[job_id] = replace(
+                job,
+                stage=stage,
+                locked_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            event_id = len(self.events) + 1
+            self.events.append(
+                JobEventRecord(event_id, job_id, event_type, stage, payload, datetime.now(timezone.utc))
+            )
+            return True
+
+    def complete(self, job_id: str, worker_id: str) -> bool:
+        return self._update_owned(job_id, worker_id, state="completed", locked_by=None, locked_at=None)
+
+    def fail(self, job_id: str, worker_id: str, error: str) -> bool:
+        return self._update_owned(job_id, worker_id, state="failed", error=error, locked_by=None, locked_at=None)
+
+    def record_event(self, job_id: str, event_type: str, stage: str | None, payload: dict[str, object]) -> int:
+        with self._lock:
+            event_id = len(self.events) + 1
+            self.events.append(
+                JobEventRecord(event_id, job_id, event_type, stage, payload, datetime.now(timezone.utc))
+            )
+            return event_id
+
+    def events_since(self, job_id: str, last_event_id: int) -> list[JobEventRecord]:
+        with self._lock:
+            return [event for event in self.events if event.job_id == job_id and event.id > last_event_id]
+
+    def get_job(self, video_id: str) -> JobRecord | None:
+        with self._lock:
+            return next((job for job in self.jobs.values() if job.video_id == video_id), None)
+
+    def recover_stale(self, stale_after_seconds: int) -> int:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)
+        recovered = 0
+        with self._lock:
+            for job_id, job in list(self.jobs.items()):
+                if job.state == "running" and job.locked_at and job.locked_at < cutoff:
+                    self.jobs[job_id] = replace(
+                        job, state="queued", locked_by=None, locked_at=None, updated_at=datetime.now(timezone.utc)
+                    )
+                    recovered += 1
+        return recovered
+
+    def _claim(self, job: JobRecord, worker_id: str) -> JobRecord:
+        now = datetime.now(timezone.utc)
+        claimed = replace(
+            job,
+            state="running",
+            attempts=job.attempts + 1,
+            locked_by=worker_id,
+            locked_at=now,
+            updated_at=now,
+        )
+        self.jobs[job.id] = claimed
+        return claimed
+
+    def _update_owned(self, job_id: str, worker_id: str, **values: object) -> bool:
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None or job.state != "running" or job.locked_by != worker_id:
+                return False
+            self.jobs[job_id] = replace(job, updated_at=datetime.now(timezone.utc), **values)
+            return True
 
 
 class FakeTranscriber:

@@ -20,9 +20,22 @@ class VideoOwnershipStore:
         username: str,
         source_type: str = "upload",
         source_url: str | None = None,
+        duration_s: float | None = None,
     ) -> None:
         try:
-            self.repository.register(video_id, username, source_type, source_url)
+            self.repository.register(video_id, username, source_type, source_url, duration_s)
+        except VideoRepositoryError as exc:
+            raise VideoOwnershipError("Video ownership is unavailable") from exc
+
+    def check_quota(
+        self,
+        username: str,
+        duration_s: float,
+        max_videos: int,
+        max_total_minutes: int,
+    ) -> bool:
+        try:
+            return self.repository.check_quota(username, duration_s, max_videos, max_total_minutes)
         except VideoRepositoryError as exc:
             raise VideoOwnershipError("Video ownership is unavailable") from exc
 

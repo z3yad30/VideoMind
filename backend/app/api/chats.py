@@ -13,6 +13,8 @@ from backend.app.container import (
     get_video_processing_service,
     get_voice_service,
 )
+from backend.app.core.config import settings
+from backend.app.core.rate_limit import rate_limiter
 from backend.app.ports import BlobStore
 from backend.app.schemas.chats import (
     ChatCreate,
@@ -130,6 +132,8 @@ async def ask_in_chat(
     ai_service: VideoAIService = Depends(get_ai_service),
     voice_service: VoiceQuestionService = Depends(get_voice_service),
 ) -> ChatQuestionResponse:
+    if not rate_limiter.hit(settings.question_rate_limit, f"user:{user.username.casefold()}"):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
     try:
         chat = chat_store.get(user.username, chat_id)
     except (ChatNotFoundError, ChatStoreError, InvalidChatIdError) as exc:

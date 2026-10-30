@@ -50,8 +50,13 @@ def test_alembic_upgrade_creates_schema_on_temporary_database(
             "chats",
             "messages",
             "message_sources",
+            "jobs",
+            "job_events",
             "alembic_version",
         }.issubset(inspect(database.engine).get_table_names())
+        assert "duration_s" in {
+            column["name"] for column in inspect(database.engine).get_columns("videos")
+        }
     finally:
         database.dispose()
 

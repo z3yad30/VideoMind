@@ -62,6 +62,7 @@ class Video(Base):
     title: Mapped[str | None] = mapped_column(String(255))
     source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="upload")
     source_url: Mapped[str | None] = mapped_column(Text)
+    duration_s: Mapped[float | None] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -125,3 +126,38 @@ class MessageSource(Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
     message: Mapped[Message] = relationship(back_populates="sources")
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+    __table_args__ = (
+        CheckConstraint("state IN ('queued', 'running', 'completed', 'failed')", name="ck_jobs_state"),
+        UniqueConstraint("video_id", name="uq_jobs_video_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    video_id: Mapped[str] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", index=True)
+    stage: Mapped[str | None] = mapped_column(String(64))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    locked_by: Mapped[str | None] = mapped_column(String(128))
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    video: Mapped[Video] = relationship()
+    events: Mapped[list["JobEvent"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+
+
+class JobEvent(Base):
+    __tablename__ = "job_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    type: Mapped[str] = mapped_column(String(64), nullable=False)
+    stage: Mapped[str | None] = mapped_column(String(64))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    job: Mapped[Job] = relationship(back_populates="events")

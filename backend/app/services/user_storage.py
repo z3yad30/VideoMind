@@ -50,5 +50,11 @@ class UserStore:
         except UserRepositoryError as exc:
             raise UserStoreError("User storage is unavailable") from exc
 
+    def purge_expired_sessions(self) -> int:
+        try:
+            return self.repository.purge_expired_sessions()
+        except UserRepositoryError as exc:
+            raise UserStoreError("User storage is unavailable") from exc
+
 
 __all__ = ["DuplicateUserError", "UserStore", "UserStoreError"]

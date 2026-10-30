@@ -75,19 +75,21 @@ def test_chroma_vector_store_maps_chunks_and_scopes_queries() -> None:
 
         def __init__(self) -> None:
             self.stored = {}
+            self.deleted: list[str] = []
 
         def get(self):
             return {"ids": list(self.stored)}
 
         def delete(self, ids):
+            self.deleted.extend(ids)
             for item_id in ids:
                 self.stored.pop(item_id, None)
 
         def upsert(self, ids, documents, metadatas, embeddings):
-            self.stored = {
+            self.stored.update({
                 item_id: {"text": text, "metadata": metadata, "embedding": embedding}
                 for item_id, text, metadata, embedding in zip(ids, documents, metadatas, embeddings)
-            }
+            })
 
         def query(self, **kwargs):
             return {
@@ -112,15 +114,23 @@ def test_chroma_vector_store_maps_chunks_and_scopes_queries() -> None:
         def delete_collection(self, name):
             assert name == "video_video"
 
-    store = ChromaVectorStore(Path("unused"), client=Client())
-    store.upsert("video", [{
+    client = Client()
+    store = ChromaVectorStore(Path("unused"), client=client)
+    chunks = [{
         "id": "0",
         "text": "fact",
         "metadata": {"video_id": "video"},
         "embedding": [1.0, 0.0],
-    }])
+    }]
+    store.upsert("video", chunks)
+    store.upsert("video", chunks)
 
+    assert len(client.collection.stored) == 1
+    assert client.collection.deleted == []
     assert store.query("video", [1.0, 0.0], 5)[0]["similarity"] == 1.0
+    store.upsert("video", [])
+    assert client.collection.stored == {}
+    assert client.collection.deleted == ["0"]
     store.delete_video("video")
 
 

@@ -4,7 +4,7 @@ import mimetypes
 from pathlib import Path
 import re
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -18,6 +18,8 @@ from backend.app.container import (
     get_video_processing_service,
     get_voice_service,
 )
+from backend.app.core.config import settings
+from backend.app.core.rate_limit import rate_limiter
 from backend.app.schemas.videos import (
     QuestionRequest,
     QuestionResponse,
@@ -37,7 +39,6 @@ from backend.app.services.auth import AuthenticatedUser
 from backend.app.services.video_storage import VideoOwnershipError, video_ownership
 
 router = APIRouter(prefix="/videos", tags=["videos"])
-_processing_tasks: set[asyncio.Task[None]] = set()
 _ARTIFACT_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -55,17 +56,16 @@ def _register_video_owner(
     username: str,
     source_type: str = "upload",
     source_url: str | None = None,
+    duration_s: float | None = None,
 ) -> None:
     try:
-        video_ownership.register(video_id, username, source_type, source_url)
+        video_ownership.register(video_id, username, source_type, source_url, duration_s)
     except VideoOwnershipError as exc:
         raise HTTPException(status_code=503, detail="Video storage is unavailable") from exc
 
 
-def _start_processing(video_service: VideoProcessingService, video_id: str, media_path: Path, source_url: str | None = None) -> None:
-    task = asyncio.create_task(asyncio.to_thread(video_service.process, video_id, media_path, source_url))
-    _processing_tasks.add(task)
-    task.add_done_callback(_processing_tasks.discard)
+def _start_processing(video_service: VideoProcessingService, video_id: str) -> None:
+    video_service.enqueue(video_id)
 
 
 def _resolve_source_media_path(video_id: str, blob_store: BlobStore) -> Path:
@@ -87,17 +87,27 @@ async def upload_video(
     media_service: MediaService = Depends(get_media_service),
     blob_store: BlobStore = Depends(get_blob_store),
 ) -> VideoJobResponse:
+    source_path: Path | None = None
     try:
+        _check_user_rate_limit(user.username, settings.ingestion_rate_limit)
         suffix = media_service.validate_filename(file.filename)
         video_id = video_service.create_job()
         source_path = blob_store.open(f"videos/{video_id}{suffix}")
         media_service.save_upload(file, source_path)
-        _register_video_owner(video_id, user.username)
+        duration_s = media_service.get_duration(source_path)
+        _check_ingestion_quota(user.username, duration_s)
+        _register_video_owner(video_id, user.username, duration_s=duration_s)
     except MediaProcessingError as exc:
+        if source_path is not None:
+            source_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        if source_path is not None:
+            source_path.unlink(missing_ok=True)
+        raise
     finally:
         await file.close()
-    _start_processing(video_service, video_id, source_path)
+    _start_processing(video_service, video_id)
     return VideoJobResponse(video_id=video_id, status="queued")
 
 
@@ -106,10 +116,17 @@ async def process_youtube(
     request: YouTubeRequest,
     user: AuthenticatedUser = Depends(get_current_user),
     video_service: VideoProcessingService = Depends(get_video_processing_service),
+    media_service: MediaService = Depends(get_media_service),
 ) -> VideoJobResponse:
+    _check_user_rate_limit(user.username, settings.ingestion_rate_limit)
+    try:
+        duration_s = media_service.get_youtube_duration(str(request.url))
+        _check_ingestion_quota(user.username, duration_s)
+    except MediaProcessingError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     video_id = video_service.create_job()
-    _register_video_owner(video_id, user.username, "youtube", str(request.url))
-    _start_processing(video_service, video_id, Path(), str(request.url))
+    _register_video_owner(video_id, user.username, "youtube", str(request.url), duration_s)
+    _start_processing(video_service, video_id)
     return VideoJobResponse(video_id=video_id, status="queued")
 
 
@@ -132,23 +149,32 @@ async def get_video_status(video_id: str, user: AuthenticatedUser = Depends(get_
 
 
 @router.get("/{video_id}/events")
-async def video_events(video_id: str, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service)) -> StreamingResponse:
+async def video_events(
+    video_id: str,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+    video_service: VideoProcessingService = Depends(get_video_processing_service),
+) -> StreamingResponse:
     _require_video_owner(video_id, user)
     if video_service.get_job(video_id) is None:
         raise HTTPException(status_code=404, detail="Video not found")
+    try:
+        last_event_id = max(0, int(request.headers.get("last-event-id", "0")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Last-Event-ID header") from exc
 
     async def stream():
-        sent = 0
+        cursor = last_event_id
         while True:
-            events = video_service.get_events(video_id)
-            for event in events[sent:]:
-                sent += 1
+            events = video_service.get_events(video_id, cursor)
+            for event in events:
+                cursor = int(event.pop("id"))
                 payload = ProcessingEventResponse(**event).model_dump(mode="json")
-                yield f"event: {payload['event']}\ndata: {json.dumps(payload)}\n\n"
+                yield f"id: {cursor}\nevent: {payload['event']}\ndata: {json.dumps(payload)}\n\n"
             job = video_service.get_job(video_id)
-            if job and job.status in {"completed", "failed"} and sent >= len(events):
+            if job and job.status in {"completed", "failed"} and not events:
                 return
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -212,6 +238,7 @@ async def get_video_media(video_id: str, user: AuthenticatedUser = Depends(get_c
 
 @router.post("/{video_id}/question", response_model=QuestionResponse)
 async def ask_question(video_id: str, request: QuestionRequest, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service), ai_service: VideoAIService = Depends(get_ai_service)) -> QuestionResponse:
+    _check_user_rate_limit(user.username, settings.question_rate_limit)
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
@@ -229,6 +256,7 @@ async def ask_question(video_id: str, request: QuestionRequest, user: Authentica
 
 @router.post("/{video_id}/voice-question", response_model=VoiceQuestionResponse)
 async def ask_voice_question(video_id: str, file: UploadFile = File(...), user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service), voice_service: VoiceQuestionService = Depends(get_voice_service)) -> VoiceQuestionResponse:
+    _check_user_rate_limit(user.username, settings.question_rate_limit)
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
@@ -249,6 +277,25 @@ async def ask_voice_question(video_id: str, file: UploadFile = File(...), user: 
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
         await file.close()
+
+
+def _check_user_rate_limit(username: str, limit: str) -> None:
+    if not rate_limiter.hit(limit, f"user:{username.casefold()}"):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+
+def _check_ingestion_quota(username: str, duration_s: float) -> None:
+    try:
+        allowed = video_ownership.check_quota(
+            username,
+            duration_s,
+            settings.max_videos_per_user,
+            settings.max_total_minutes_per_user,
+        )
+    except VideoOwnershipError as exc:
+        raise HTTPException(status_code=503, detail="Video storage is unavailable") from exc
+    if not allowed:
+        raise HTTPException(status_code=429, detail="User ingestion quota exceeded")
 
 
 @router.get("/{video_id}/answers/{answer_id}/audio")

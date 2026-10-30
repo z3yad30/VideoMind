@@ -1,6 +1,7 @@
 from tests.fakes.ports import (
     FakeBlobStore,
     FakeEmbedder,
+    FakeJobQueue,
     FakeLLMClient,
     FakeTranscriber,
     FakeTTS,
@@ -10,6 +11,7 @@ from tests.fakes.ports import (
 __all__ = [
     "FakeBlobStore",
     "FakeEmbedder",
+    "FakeJobQueue",
     "FakeLLMClient",
     "FakeTranscriber",
     "FakeTTS",

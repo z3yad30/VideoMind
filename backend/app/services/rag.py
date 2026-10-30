@@ -80,7 +80,7 @@ class TranscriptRAGService:
             raise ValueError("video_id must be a non-empty string")
         return f"video_{video_id}"
 
-    def index_transcript(self, video_id: str, on_progress: Callable[[str, int, int], None] | None = None) -> list[dict[str, object]]:
+    def prepare_transcript_chunks(self, video_id: str) -> list[dict[str, object]]:
         transcript_key = f"transcripts/{video_id}.json"
         if not self.blob_store.exists(transcript_key):
             return []
@@ -94,29 +94,53 @@ class TranscriptRAGService:
             return []
 
         chunks = chunk_transcript(segments, self.max_chunk_characters)
-        if on_progress:
-            on_progress("chunking", len(chunks), len(chunks))
         source = str(transcript_path)
-        if not chunks:
-            self.vector_store.upsert(video_id, [])
-            return []
-        texts = [chunk.text for chunk in chunks]
+        return [
+            {"id": chunk.chunk_id, "text": chunk.text, "metadata": chunk.metadata(video_id, source)}
+            for chunk in chunks
+        ]
+
+    def embed_chunks(
+        self,
+        chunks: list[dict[str, object]],
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> list[list[float]]:
+        texts = [str(chunk["text"]) for chunk in chunks]
         if on_progress:
             on_progress("embedding", 0, len(texts))
-        embeddings = self.embedder.embed(texts)
+        embeddings = self.embedder.embed(texts) if texts else []
         if len(embeddings) != len(chunks):
             raise RuntimeError("Embedder returned an unexpected number of vectors")
+        if on_progress:
+            on_progress("embedding", len(texts), len(texts))
+        return embeddings
+
+    def index_chunks(
+        self,
+        video_id: str,
+        chunks: list[dict[str, object]],
+        embeddings: list[list[float]],
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> None:
+        if len(embeddings) != len(chunks):
+            raise RuntimeError("Embedding count does not match transcript chunk count")
         self.vector_store.upsert(
             video_id,
             [
-                {"id": chunk.chunk_id, "text": chunk.text, "metadata": chunk.metadata(video_id, source), "embedding": embedding}
+                {**chunk, "embedding": embedding}
                 for chunk, embedding in zip(chunks, embeddings)
             ],
         )
         if on_progress:
-            on_progress("embedding", len(texts), len(texts))
-            on_progress("indexing", len(texts), len(texts))
-        return [{"text": chunk.text, "metadata": chunk.metadata(video_id, source)} for chunk in chunks]
+            on_progress("indexing", len(chunks), len(chunks))
+
+    def index_transcript(self, video_id: str, on_progress: Callable[[str, int, int], None] | None = None) -> list[dict[str, object]]:
+        chunks = self.prepare_transcript_chunks(video_id)
+        if on_progress:
+            on_progress("chunking", len(chunks), len(chunks))
+        embeddings = self.embed_chunks(chunks, on_progress)
+        self.index_chunks(video_id, chunks, embeddings, on_progress)
+        return [{"text": chunk["text"], "metadata": chunk["metadata"]} for chunk in chunks]
 
     @classmethod
     def filter_relevant_chunks(

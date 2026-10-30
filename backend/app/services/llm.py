@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import tempfile
 from typing import Callable
 
 from backend.app.core.config import settings
@@ -182,6 +183,25 @@ class VideoAIService:
     ) -> list[dict[str, object]]:
         return self.rag.index_transcript(video_id, on_progress=on_progress)
 
+    def prepare_transcript_chunks(self, video_id: str) -> list[dict[str, object]]:
+        return self.rag.prepare_transcript_chunks(video_id)
+
+    def embed_transcript_chunks(
+        self,
+        chunks: list[dict[str, object]],
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> list[list[float]]:
+        return self.rag.embed_chunks(chunks, on_progress)
+
+    def index_transcript_chunks(
+        self,
+        video_id: str,
+        chunks: list[dict[str, object]],
+        embeddings: list[list[float]],
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> None:
+        self.rag.index_chunks(video_id, chunks, embeddings, on_progress)
+
     def index_and_summarize(self, video_id: str) -> None:
         chunks = self.index_transcript(video_id)
         summary = self.generate_summary(chunks)
@@ -199,7 +219,9 @@ class VideoAIService:
 
     def generate_summary_audio(self, video_id: str, summary: dict[str, str]) -> None:
         summary_text = "\n".join(f"{field}: {summary[field]}" for field in SUMMARY_FIELDS if summary[field])
-        self.tts.synthesize(summary_text, self.blob_store.open(f"audio/summaries/{video_id}.wav"))
+        with tempfile.TemporaryDirectory(prefix="videomind-summary-") as directory:
+            generated = self.tts.synthesize(summary_text, Path(directory) / "summary.wav")
+            self.blob_store.put(f"audio/summaries/{video_id}.wav", generated)
 
     def get_summary(self, video_id: str) -> dict[str, str] | None:
         key = f"summaries/{video_id}.json"

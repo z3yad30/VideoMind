@@ -1,6 +1,7 @@
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+import wave
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -18,6 +19,16 @@ import backend.app.api.videos as videos_api
 from backend.app.services.video_storage import VideoOwnershipStore
 from tests.fakes import FakeBlobStore, FakeTTS
 from tests.database import create_database, seed_user
+
+
+def _wav_bytes() -> bytes:
+    output = BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b"\0\0" * 320)
+    return output.getvalue()
 
 
 class FakeASR:
@@ -65,7 +76,7 @@ async def test_voice_question_runs_asr_rag_and_tts_without_indexing(monkeypatch:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             f"/videos/{video_id}/voice-question",
-            files={"file": ("question.wav", b"microphone audio", "audio/wav")},
+            files={"file": ("question.wav", _wav_bytes(), "audio/wav")},
         )
 
     assert response.status_code == 200
@@ -111,4 +122,4 @@ def test_tts_failure_is_normalized(tmp_path: Path) -> None:
     )
 
     with pytest.raises(RuntimeError, match="TTS synthesis failed"):
-        service.answer("video-1", SimpleNamespace(filename="question.wav", file=BytesIO(b"audio")))
+        service.answer("video-1", SimpleNamespace(filename="question.wav", file=BytesIO(_wav_bytes())))

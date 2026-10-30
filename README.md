@@ -2,7 +2,7 @@
 
 VideoMind is a local-first MVP for uploading media or processing an authorized YouTube URL, transcribing it, generating a grounded summary, and answering text or voice questions about that specific video.
 
-The backend and Vite frontend are implemented. The application requires a username/password account to enter the frontend workspace; the backend provides cookie-based sessions and persistent user-owned chats. User, session, video ownership, and chat records are stored in a local SQL database; media and derived artifacts remain on the local filesystem. The current deployment model is a single Windows-hosted process.
+The backend and Vite frontend are implemented. The application requires a username/password account to enter the frontend workspace; the backend provides cookie-based sessions and persistent user-owned chats. User, session, video ownership, job, and chat records are stored in a local SQL database; media and derived artifacts remain on the local filesystem. The current deployment model is one Windows host, with an optional separate worker process.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ The pipeline is:
 
 1. Upload a video/audio file or submit a YouTube URL.
 2. Persist the source under `data/videos/{video_id}{extension}` for both uploads and YouTube downloads, and record its authenticated owner in the local SQL database.
-3. Extract audio with FFmpeg in a temporary working directory.
+3. Extract audio with FFmpeg and retain the normalized intermediate at `data/audio/extracted/{video_id}.wav` for resumable processing.
 4. Transcribe audio with configurable `faster-whisper`.
 5. Persist timestamped transcript segments.
 6. Chunk transcript segments while preserving timestamps.
@@ -106,7 +106,9 @@ GROQ_MODEL=openai/gpt-oss-120b
 
 Never hardcode or commit API keys. `.env` is ignored by Git. Tests must use mocked external services and must not require a Groq key.
 
-The application loads environment variables with `python-dotenv`. ASR, upload limits, subprocess timeouts, question length, and storage paths are configurable through the backend settings module.
+The application loads environment variables with `python-dotenv`. `DATABASE_URL`, `SQLITE_BUSY_TIMEOUT_MS`, `WORKER_MODE`, and `MAX_CONCURRENT_JOBS` configure persistence and worker behavior. `WORKER_MODE` is `embedded` by default; `external` disables the API's worker thread. `MAX_CONCURRENT_JOBS` defaults to `1`. `COOKIE_SECURE` defaults to false for local development and true when `APP_ENV=production`; SameSite remains Lax. `ALLOWED_ORIGINS` is a comma-separated origin allowlist and defaults to the Vite origins on port 5173. Unsafe HTTP methods require a matching Origin or Referer.
+
+Authentication and ingestion limits can be configured with `LOGIN_RATE_LIMIT`, `REGISTER_RATE_LIMIT`, `INGESTION_RATE_LIMIT`, and `QUESTION_RATE_LIMIT` (defaults: 5/minute, 5/minute, 10/hour, and 30/minute). Upload duration and per-user quotas use `MAX_MEDIA_DURATION_SECONDS`, `MAX_VIDEOS_PER_USER`, and `MAX_TOTAL_MINUTES_PER_USER`. `FFPROBE_BINARY` and `SUBPROCESS_TIMEOUT_SECONDS` configure media probing and command timeouts. ASR, upload byte limits, question length, and storage paths are also configurable through backend settings.
 
 ## Running the Backend
 
@@ -117,6 +119,16 @@ cd /d C:\Users\Royal\Projects\VideoMind
 .venv\Scripts\activate
 uvicorn backend.app.main:app --reload
 ```
+
+With the default `WORKER_MODE=embedded`, the API starts its durable-job worker in a background thread. To run it in a separate terminal instead, set `WORKER_MODE=external` in `.env`, start the API as usual, then run:
+
+```cmd
+cd /d C:\Users\Royal\Projects\VideoMind
+.venv\Scripts\activate
+python -m backend.worker
+```
+
+The worker claims jobs from the SQL database, sends heartbeats, and resumes stale jobs from their last completed stage. `MAX_CONCURRENT_JOBS` controls the number of simultaneous jobs per worker process.
 
 ## Authentication
 
@@ -135,7 +147,7 @@ On startup, the frontend calls `GET /auth/me` and only mounts the VideoMind work
 
 Chat and video routes require this authenticated session. Uploaded and YouTube-processed videos are assigned to the authenticated account in the database. Video status, SSE events, media, transcript, summary, voice answers, and Q&A all check ownership. Chats can only reference videos owned by the current user. Chat answer audio is separately checked against the owning chat and assistant message. Unknown and foreign resource IDs return `404`.
 
-The browser session survives page refreshes through the HTTP-only cookie and persistent session records; the cookie expires after 12 hours. The cookie is configured for local HTTP rather than HTTPS. There is no rate limiting, CSRF token, durable job queue, or multi-worker shared job state. Do not expose this local MVP to the public internet as-is. Video artifacts without an ownership record are intentionally inaccessible until assigned through a trusted migration or reprocessed under an account; do not auto-assign legacy artifacts in a multi-account installation.
+The browser session survives page refreshes and backend restarts through the HTTP-only cookie and persistent session records; the cookie expires after 12 hours. `COOKIE_SECURE` controls HTTPS-only cookies, and unsafe methods are restricted to `ALLOWED_ORIGINS`. Configurable in-memory rate limits protect authentication, ingestion, and question routes. This remains a single-host local-first MVP; perform a deployment review before exposing it publicly. Video artifacts without an ownership record are intentionally inaccessible until assigned through a trusted migration or reprocessed under an account; do not auto-assign legacy artifacts in a multi-account installation.
 
 ## Database Setup and Legacy Import
 
@@ -321,9 +333,9 @@ The LLM must not invent unsupported facts. If the question is unrelated to the v
 
 ## YouTube and Upload Processing
 
-Uploads are validated by size, extension, and MIME type where available. Filenames are sanitized and never used as identifiers. YouTube URLs are validated before `yt-dlp` is invoked.
+Uploads are validated by size, extension, magic bytes, and probed duration before they are queued. Filenames are sanitized and never used as identifiers. YouTube URLs are limited to YouTube hosts, playlists are disabled, and yt-dlp runs with a configured timeout. Per-user video-count and total-duration quotas apply before jobs are enqueued.
 
-The actual storage model is persistent: every successfully downloaded YouTube source is saved to `data/videos/{video_id}{extension}` and remains available after the job completes. Uploaded files also use the same source-storage pattern in `data/videos/`; only the extracted WAV/intermediate processing files live in temporary working directories and are cleaned up as part of the processing job. Playback is intentionally blocked until the job reaches `completed`, at which point the frontend loads the saved source from the backend media route instead of showing a broken object URL.
+The actual storage model is persistent: every successfully downloaded YouTube source is saved to `data/videos/{video_id}{extension}` and remains available after the job completes. Uploaded files also use the same source-storage pattern in `data/videos/`. Extracted audio is checkpointed under `data/audio/extracted/` and intermediate chunk/embedding JSON under `data/transcripts/` so interrupted work can resume. Playback is intentionally blocked until the job reaches `completed`, at which point the frontend loads the saved source from the backend media route instead of showing a broken object URL.
 
 Invalid URLs, unsupported media, missing FFmpeg, failed downloads, corrupted files, empty audio, and service failures still produce logged, user-facing errors without exposing secrets.
 
@@ -352,8 +364,8 @@ The current suite verifies retrieval thresholds, raw transcript fallback, voice 
 
 ## Current limitations
 
-- Job status is in memory and `BackgroundTasks` is process-local. A restart loses status, and multiple workers do not share jobs.
-- Sessions and processing jobs are process-local. Backend restart invalidates sessions and loses active job status; multiple workers do not share session or job state. There is no rate limiting or CSRF defense, and the cookie is configured for local HTTP. This is not ready for an internet-facing deployment.
+- Job state and event history are persisted in SQL. Workers share the queue using atomic claims and recover stale heartbeats; media/artifact files must remain available on the configured local filesystem.
+- Sessions are persisted but expire after 12 hours. Rate limiting is in-memory and therefore local to one process; review the operational model before running multiple API processes or exposing the service publicly.
 - Video owner metadata is local JSON beside the source media. Older video artifacts without an owner entry cannot be safely attributed automatically and must be reprocessed under an account.
 - ChromaDB, transcripts, summaries, and audio use local filesystem storage. Use a database/object store and isolated vector namespaces for multi-instance deployment.
 - ASR, embeddings, Groq, FFmpeg, and Windows SAPI TTS are blocking and resource-intensive. Production deployment needs bounded worker pools, retries, quotas, and retention cleanup.
@@ -368,7 +380,7 @@ The current suite verifies retrieval thresholds, raw transcript fallback, voice 
 
 ## Current Runtime Behavior
 
-Uploads and YouTube URLs start background processing and return a generated `video_id`. The original source remains in `data/videos/`; extracted audio uses a temporary working directory. Processing stages and replayable SSE events are process-local. On completion, the frontend loads saved playback, transcript, and summary context and creates a persistent chat. New chat creates another chat for the selected video and does not redownload or reprocess it.
+Uploads and YouTube URLs enqueue a durable job and return a generated `video_id`. The original source remains in `data/videos/`; normalized audio, transcript/chunk/embedding checkpoints, summaries, and audio remain under `data/`. The worker checkpoints completed stages and uses database-backed events for status and SSE replay. `Last-Event-ID` reconnects replay only events not yet received. On completion, the frontend loads saved playback, transcript, and summary context and creates a persistent chat. New chat creates another chat for the selected video and does not redownload or reprocess it.
 
 Persistent chat records contain the complete conversation. Groq receives only the latest three prior user/assistant messages for chat continuity, plus the selected video's retrieved evidence or bounded raw-transcript fallback. Transcript evidence is video-scoped, threshold-filtered, timestamped, and exposed as collapsed per-answer sources in the UI.
 

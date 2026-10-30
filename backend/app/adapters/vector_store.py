@@ -24,9 +24,11 @@ class ChromaVectorStore:
 
     def upsert(self, video_id: str, chunks: list[dict[str, object]]) -> None:
         collection = self.client.get_or_create_collection(self.collection_name(video_id))
-        existing = collection.get().get("ids", [])
-        if existing:
-            collection.delete(ids=existing)
+        existing_ids = collection.get().get("ids", [])
+        chunk_ids = {str(chunk["id"]) for chunk in chunks}
+        stale_ids = [chunk_id for chunk_id in existing_ids if chunk_id not in chunk_ids]
+        if stale_ids:
+            collection.delete(ids=stale_ids)
         if chunks:
             collection.upsert(
                 ids=[str(chunk["id"]) for chunk in chunks],

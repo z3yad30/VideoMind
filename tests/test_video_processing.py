@@ -1,5 +1,4 @@
-import sys
-import types
+import json
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +18,7 @@ from backend.app.schemas.videos import YouTubeRequest
 import backend.app.api.videos as videos_api
 import backend.app.services.media as media_module
 from backend.app.services.video_storage import VideoOwnershipStore
-from tests.fakes import FakeBlobStore, FakeTranscriber
+from tests.fakes import FakeBlobStore, FakeJobQueue, FakeTranscriber
 from tests.database import create_database, seed_user
 
 
@@ -69,6 +68,7 @@ def test_processing_preserves_timestamps_and_keeps_source(tmp_path: Path) -> Non
         FakeTranscriber([ASRSegment(" first sentence ", 0.25, 1.75), ASRSegment("second sentence", 2.0, 3.5)]),
         None,
         FakeBlobStore(tmp_path / "data"),
+        FakeJobQueue(),
     )
     video_id = service.create_job()
 
@@ -88,7 +88,7 @@ def test_processing_emits_stage_events(tmp_path: Path) -> None:
     source = tmp_path / "source.wav"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"source")
-    service = VideoProcessingService(FakeMedia(), FakeTranscriber(), None, FakeBlobStore(tmp_path / "data"))
+    service = VideoProcessingService(FakeMedia(), FakeTranscriber(), None, FakeBlobStore(tmp_path / "data"), FakeJobQueue())
     video_id = service.create_job()
 
     try:
@@ -105,7 +105,7 @@ def test_processing_records_failure_and_keeps_source(tmp_path: Path) -> None:
     source = tmp_path / "source.wav"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"source")
-    service = VideoProcessingService(FakeMedia(), lambda: None, None, FakeBlobStore(tmp_path / "data"))  # type: ignore[arg-type]
+    service = VideoProcessingService(FakeMedia(), lambda: None, None, FakeBlobStore(tmp_path / "data"), FakeJobQueue())  # type: ignore[arg-type]
     video_id = service.create_job()
 
     try:
@@ -118,6 +118,96 @@ def test_processing_records_failure_and_keeps_source(tmp_path: Path) -> None:
         (tmp_path / "data" / "transcripts" / f"{video_id}.json").unlink(missing_ok=True)
 
 
+def test_processing_resumes_from_checkpoint_and_skips_existing_outputs(tmp_path: Path) -> None:
+    class CountingMedia(FakeMedia):
+        def __init__(self) -> None:
+            self.extractions = 0
+
+        def extract_audio(self, media_path: Path, output_dir: Path) -> Path:
+            self.extractions += 1
+            return super().extract_audio(media_path, output_dir)
+
+    media = CountingMedia()
+    blob_store = FakeBlobStore(tmp_path / "data")
+    queue = FakeJobQueue()
+    service = VideoProcessingService(media, FakeTranscriber(), None, blob_store, queue)
+    video_id = service.create_job()
+    queued = queue.enqueue(video_id)
+    claimed = queue.claim_job(queued.id, "worker")
+    assert claimed is not None
+    blob_store.put(f"audio/extracted/{video_id}.wav", b"existing audio")
+    blob_store.write_transcript(
+        video_id,
+        [{"text": "already transcribed", "start": 2.0, "end": 3.0}],
+    )
+    assert queue.checkpoint(claimed.id, "worker", "extracting_audio")
+
+    service.process_claimed(queue.get_job(video_id), "worker")
+
+    result = service.get_job(video_id)
+    assert result is not None and result.status == "completed"
+    assert media.extractions == 0
+    assert service.get_transcript(video_id) == [
+        {"text": "already transcribed", "start": 2.0, "end": 3.0}
+    ]
+    assert any(event["event"] == "processing_completed" for event in service.get_events(video_id))
+
+
+def test_processing_resumes_at_embedding_and_reuses_saved_chunks_and_summary(tmp_path: Path) -> None:
+    class CountingAI:
+        def __init__(self) -> None:
+            self.prepare_calls = 0
+            self.embed_calls = 0
+            self.indexed_ids: list[str] = []
+            self.summary_calls = 0
+            self.audio_calls = 0
+
+        def prepare_transcript_chunks(self, _video_id):
+            self.prepare_calls += 1
+            raise AssertionError("A completed chunk stage must not run again")
+
+        def embed_transcript_chunks(self, _chunks, _progress=None):
+            self.embed_calls += 1
+            raise AssertionError("A completed embedding stage must not run again")
+
+        def index_transcript_chunks(self, _video_id, chunks, embeddings, _progress=None):
+            self.indexed_ids.extend(str(chunk["id"]) for chunk in chunks)
+            assert len(embeddings) == len(chunks)
+
+        def generate_summary(self, _chunks):
+            self.summary_calls += 1
+            raise AssertionError("An existing summary must be reused")
+
+        def save_summary(self, _video_id, _summary):
+            raise AssertionError("An existing summary must not be rewritten")
+
+        def generate_summary_audio(self, _video_id, _summary):
+            self.audio_calls += 1
+            raise AssertionError("Existing summary audio must be reused")
+
+    video_id = "c" * 32
+    blob_store = FakeBlobStore(tmp_path / "data")
+    queue = FakeJobQueue()
+    ai = CountingAI()
+    service = VideoProcessingService(FakeMedia(), FakeTranscriber(), ai, blob_store, queue)
+    queued = queue.enqueue(video_id)
+    claimed = queue.claim_job(queued.id, "worker")
+    assert claimed is not None
+    chunks = [{"id": "0", "text": "saved chunk", "metadata": {"video_id": video_id}}]
+    blob_store.put(f"transcripts/{video_id}.chunks.json", json.dumps({"chunks": chunks}))
+    blob_store.put(f"transcripts/{video_id}.embeddings.json", json.dumps({"embeddings": [[1.0, 0.0]]}))
+    blob_store.put(f"summaries/{video_id}.json", json.dumps({"summary": {"topic": "saved"}}))
+    blob_store.put(f"audio/summaries/{video_id}.wav", b"saved audio")
+    assert queue.checkpoint(claimed.id, "worker", "embedding")
+
+    service.process_claimed(queue.get_job(video_id), "worker")
+
+    result = service.get_job(video_id)
+    assert result is not None and result.status == "completed"
+    assert ai.prepare_calls == ai.embed_calls == ai.summary_calls == ai.audio_calls == 0
+    assert ai.indexed_ids == ["0"]
+
+
 def test_youtube_processing_persists_source_in_existing_video_layout(tmp_path: Path) -> None:
     class YoutubeMedia(FakeMedia):
         def download_youtube(self, source_url: str, output_dir: Path, video_id: str) -> Path:
@@ -127,7 +217,7 @@ def test_youtube_processing_persists_source_in_existing_video_layout(tmp_path: P
             return source
 
     blob_store = FakeBlobStore(tmp_path / "data")
-    service = VideoProcessingService(YoutubeMedia(), FakeTranscriber(), None, blob_store)
+    service = VideoProcessingService(YoutubeMedia(), FakeTranscriber(), None, blob_store, FakeJobQueue())
     video_id = service.create_job()
 
     service.process(video_id, Path(), "https://youtube.com/watch?v=example")
@@ -141,6 +231,31 @@ async def test_upload_rejects_unsupported_media() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/videos/upload", files={"file": ("notes.txt", b"text", "text/plain")})
     assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_bad_magic_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    authenticated_video_user: VideoOwnershipStore,
+) -> None:
+    video_id = "1" * 32
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        get_video_processing_service,
+        lambda: SimpleNamespace(create_job=lambda: video_id),
+    )
+    blob_store = FakeBlobStore(tmp_path / "magic-data")
+    monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: blob_store)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/videos/upload",
+            files={"file": ("source.mp4", b"not a video", "video/mp4")},
+        )
+
+    assert response.status_code == 400
+    assert not blob_store.open(f"videos/{video_id}.mp4").exists()
 
 
 @pytest.mark.asyncio
@@ -253,22 +368,15 @@ async def test_invalid_youtube_url_and_malformed_question_are_rejected(monkeypat
 
 
 def test_inaccessible_youtube_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    class FailingDownloader:
-        def __init__(self, options):
-            pass
+    monkeypatch.setattr(
+        media_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stderr="private video", stdout=""
+        ),
+    )
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def download(self, urls):
-            raise RuntimeError("private video")
-
-    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FailingDownloader))
-
-    with pytest.raises(Exception, match="YouTube download failed: private video"):
+    with pytest.raises(Exception, match="YouTube operation failed: private video"):
         MediaService().download_youtube("https://youtube.com/watch?v=private", tmp_path)
 
 
@@ -276,7 +384,9 @@ def test_concurrent_jobs_keep_independent_state(tmp_path: Path) -> None:
     class ConcurrentMedia(FakeMedia):
         pass
 
-    service = VideoProcessingService(ConcurrentMedia(), FakeTranscriber(), None, FakeBlobStore(tmp_path / "data"))
+    service = VideoProcessingService(
+        ConcurrentMedia(), FakeTranscriber(), None, FakeBlobStore(tmp_path / "data"), FakeJobQueue()
+    )
     sources = [tmp_path / f"source-{index}.wav" for index in range(2)]
     video_ids = [service.create_job() for _ in sources]
     for source in sources:
@@ -294,28 +404,21 @@ def test_concurrent_jobs_keep_independent_state(tmp_path: Path) -> None:
 
 
 def test_youtube_downloader_persists_source_under_video_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    calls: list[tuple[list[str], dict]] = []
+    calls: list[list[str]] = []
 
-    class FakeDownloader:
-        def __init__(self, options):
-            calls.append(([], options))
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        (tmp_path / "abc123.mp4").write_bytes(b"\x00\x00\x00\x18ftypisom")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def download(self, urls):
-            calls[-1] = (urls, calls[-1][1])
-            (tmp_path / "abc123.mp4").write_bytes(b"video")
-
-    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeDownloader))
+    monkeypatch.setattr(media_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(MediaService, "get_duration", lambda self, path: 30.0)
+    monkeypatch.setattr(MediaService, "validate_magic", lambda self, path: None)
     result = MediaService().download_youtube("https://www.youtube.com/watch?v=example", tmp_path, "abc123")
 
     assert result == tmp_path / "abc123.mp4"
-    assert calls[0][0] == ["https://www.youtube.com/watch?v=example"]
-    assert calls[0][1]["noplaylist"] is True
+    assert calls[0][-1] == "https://www.youtube.com/watch?v=example"
+    assert "--no-playlist" in calls[0]
     assert result.exists()
 
 
@@ -357,10 +460,18 @@ async def test_video_upload_and_youtube_jobs_are_persistently_owned(
             destination.write_bytes(file.file.read())
             return destination
 
+        @staticmethod
+        def get_duration(_path: Path) -> float:
+            return 60.0
+
+        @staticmethod
+        def get_youtube_duration(_url: str) -> float:
+            return 120.0
+
     monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: jobs)
     monkeypatch.setitem(app.dependency_overrides, get_media_service, UploadMedia)
     monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: FakeBlobStore(tmp_path / "data"))
-    monkeypatch.setattr(videos_api, "_start_processing", lambda _service, video_id, _path, source_url=None: started.append((video_id, source_url)))
+    monkeypatch.setattr(videos_api, "_start_processing", lambda _service, video_id: started.append((video_id, None)))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         uploaded = await client.post("/videos/upload", files={"file": ("source.mp4", b"video", "video/mp4")})
@@ -369,7 +480,7 @@ async def test_video_upload_and_youtube_jobs_are_persistently_owned(
     assert uploaded.status_code == youtube.status_code == 202
     assert authenticated_video_user.is_owned_by("f" * 32, "alice")
     assert authenticated_video_user.is_owned_by("0" * 32, "alice")
-    assert started == [("f" * 32, None), ("0" * 32, "https://www.youtube.com/watch?v=example")]
+    assert started == [("f" * 32, None), ("0" * 32, None)]
 
 
 @pytest.mark.asyncio
@@ -398,6 +509,45 @@ async def test_video_routes_reject_anonymous_and_foreign_users(
 
     assert anonymous_response.status_code == 401
     assert status_response.status_code == media_response.status_code == question_response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_events_endpoint_replays_only_events_after_last_event_id(
+    monkeypatch: pytest.MonkeyPatch,
+    authenticated_video_user: VideoOwnershipStore,
+) -> None:
+    video_id = "d" * 32
+    authenticated_video_user.register(video_id, "alice")
+    events = [
+        {
+            "id": event_id,
+            "event": "stage_completed",
+            "video_id": video_id,
+            "stage": "validating",
+            "status": "completed",
+            "progress": 100,
+            "message": "done",
+            "detail": None,
+            "timestamp": "2026-10-30T12:00:00+00:00",
+        }
+        for event_id in (7, 8, 9)
+    ]
+    service = SimpleNamespace(
+        get_job=lambda _: SimpleNamespace(status="completed"),
+        get_events=lambda _, cursor=0: [event.copy() for event in events if event["id"] > cursor],
+    )
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: service)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            f"/videos/{video_id}/events",
+            headers={"Last-Event-ID": "7"},
+        )
+
+    assert response.status_code == 200
+    assert "id: 8\n" in response.text
+    assert "id: 9\n" in response.text
+    assert "id: 7\n" not in response.text
 
 
 @pytest.mark.asyncio

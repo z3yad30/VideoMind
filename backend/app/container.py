@@ -5,11 +5,13 @@ from backend.app.adapters import (
     ChromaVectorStore,
     FasterWhisperTranscriber,
     GroqLLMClient,
+    SqlJobQueue,
     LocalBlobStore,
     Pyttsx3TTS,
     SentenceTransformerEmbedder,
 )
 from backend.app.core.config import settings
+from backend.app.db.database import get_database
 from backend.app.services.llm import GroqLLMService, VideoAIService
 from backend.app.services.media import MediaService
 from backend.app.services.rag import TranscriptRAGService
@@ -19,6 +21,7 @@ from backend.app.services.voice import VoiceQuestionService
 
 @dataclass(frozen=True)
 class ApplicationContainer:
+    job_queue: SqlJobQueue
     blob_store: LocalBlobStore
     transcriber: FasterWhisperTranscriber
     embedder: SentenceTransformerEmbedder
@@ -34,6 +37,7 @@ class ApplicationContainer:
 
 @lru_cache(maxsize=1)
 def get_container() -> ApplicationContainer:
+    job_queue = SqlJobQueue(get_database().session_factory)
     blob_store = LocalBlobStore(settings.project_root / "data")
     transcriber = FasterWhisperTranscriber()
     embedder = SentenceTransformerEmbedder()
@@ -43,9 +47,10 @@ def get_container() -> ApplicationContainer:
     media = MediaService()
     rag = TranscriptRAGService(blob_store, embedder, vector_store)
     ai = VideoAIService(GroqLLMService(llm_client), rag, blob_store, tts)
-    video_processing = VideoProcessingService(media, transcriber, ai, blob_store)
+    video_processing = VideoProcessingService(media, transcriber, ai, blob_store, job_queue)
     voice = VoiceQuestionService(ai, media, transcriber, tts, blob_store)
     return ApplicationContainer(
+        job_queue=job_queue,
         blob_store=blob_store,
         transcriber=transcriber,
         embedder=embedder,

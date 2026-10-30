@@ -85,3 +85,15 @@ class UserRepo:
                     session.delete(record)
         except SQLAlchemyError as exc:
             raise UserRepositoryError from exc
+
+    def purge_expired_sessions(self, now: datetime | None = None) -> int:
+        from sqlalchemy import delete
+
+        try:
+            with self.session_factory.begin() as session:
+                result = session.execute(
+                    delete(Session).where(Session.expires_at <= (now or datetime.now(timezone.utc)))
+                )
+                return int(result.rowcount or 0)
+        except SQLAlchemyError as exc:
+            raise UserRepositoryError from exc
