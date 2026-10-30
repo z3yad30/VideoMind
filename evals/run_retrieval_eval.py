@@ -8,9 +8,13 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
+
+from sqlalchemy.orm import Session as OrmSession
 
 from backend.app.container import get_container
+from backend.app.db.database import get_database
+from backend.app.db.models import Video
 from backend.app.services.rag import DEFAULT_TOP_K, TranscriptRAGService
 
 
@@ -126,25 +130,49 @@ def score_retrieval(
 def collect_candidates(
     rag: TranscriptRAGService,
     row: EvaluationRow,
+    session_factory: Callable[[], OrmSession] | None = None,
 ) -> list[dict[str, object]]:
-    transcript_key = f"transcripts/{row.video_id}.json"
+    artifact_id = resolve_artifact_id(row.video_id, session_factory)
+    transcript_key = f"transcripts/{artifact_id}.json"
     if not rag.blob_store.exists(transcript_key):
         raise FileNotFoundError(
             f"Video {row.video_id!r} has no transcript artifact at data/{transcript_key}"
         )
+    if not rag.vector_store.exists(artifact_id):
+        raise FileNotFoundError(
+            f"Video {row.video_id!r} has no indexed vector collection for artifact {artifact_id!r}"
+        )
     embeddings = rag.embedder.embed([row.question])
     if len(embeddings) != 1:
         raise RuntimeError(f"Embedder returned {len(embeddings)} vectors for one query")
-    return rag.vector_store.query(row.video_id, embeddings[0], DEFAULT_TOP_K)
+    return rag.vector_store.query(artifact_id, embeddings[0], DEFAULT_TOP_K)
 
 
-def evaluate(rag: TranscriptRAGService, rows: Sequence[EvaluationRow]) -> list[tuple[float, Metrics]]:
+def resolve_artifact_id(
+    video_id: str,
+    session_factory: Callable[[], OrmSession] | None = None,
+) -> str:
+    """Map the API video ID to the asset ID used by transcript and vector artifacts."""
+    factory = session_factory or get_database().session_factory
+    with factory() as session:
+        video = session.get(Video, video_id)
+        return video.asset_id if video is not None and video.asset_id else video_id
+
+
+def evaluate(
+    rag: TranscriptRAGService,
+    rows: Sequence[EvaluationRow],
+    session_factory: Callable[[], OrmSession] | None = None,
+) -> list[tuple[float, Metrics]]:
     usable_rows = [row for row in rows if not is_placeholder(row)]
     if not usable_rows:
         raise ValueError(
             "The dataset contains only placeholder rows. Replace them with real indexed video examples."
         )
-    candidates_by_row = [(row, collect_candidates(rag, row)) for row in usable_rows]
+    candidates_by_row = [
+        (row, collect_candidates(rag, row, session_factory))
+        for row in usable_rows
+    ]
     results: list[tuple[float, Metrics]] = []
     for threshold in THRESHOLDS:
         filtered = [

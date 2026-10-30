@@ -2,13 +2,18 @@ import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
+from backend.app.db.models import MediaAsset, User, Video
 from evals.run_retrieval_eval import (
     EvaluationRow,
+    collect_candidates,
     is_placeholder,
     load_dataset,
+    resolve_artifact_id,
     score_retrieval,
 )
+from tests.database import create_database, seed_user
 
 
 def test_load_dataset_skips_blank_lines_and_reads_expected_schema(tmp_path: Path) -> None:
@@ -56,3 +61,69 @@ def test_invalid_dataset_row_reports_line_number(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match=r"dataset\.jsonl:1: invalid retrieval-eval row"):
         load_dataset(dataset)
+
+
+def test_video_id_resolves_to_shared_artifact_id(tmp_path: Path) -> None:
+    database = create_database(tmp_path)
+    seed_user(database, "alice")
+    asset_id = "a" * 32
+    video_id = "b" * 32
+    with database.session_factory.begin() as session:
+        session.add(
+            MediaAsset(
+                id=asset_id,
+                sha256="c" * 64,
+                size=1,
+                duration_s=1.0,
+                blob_key=f"videos/assets/{asset_id}.mp4",
+                status="completed",
+            )
+        )
+        session.flush()
+        session.add(
+            Video(
+                id=video_id,
+                user_id=session.scalar(select(User.id)),
+                asset_id=asset_id,
+                source_type="upload",
+                status="completed",
+            )
+        )
+    assert resolve_artifact_id(video_id, database.session_factory) == asset_id
+    assert resolve_artifact_id("youtube-video-id", database.session_factory) == "youtube-video-id"
+
+    class BlobStore:
+        def exists(self, key: str) -> bool:
+            return key == f"transcripts/{asset_id}.json"
+
+    class Embedder:
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            assert texts == ["What happened?"]
+            return [[0.1, 0.2]]
+
+    class VectorStore:
+        queried: tuple[str, int] | None = None
+
+        def exists(self, collection_id: str) -> bool:
+            return collection_id == asset_id
+
+        def query(self, collection_id: str, _embedding: list[float], top_k: int) -> list[dict[str, object]]:
+            self.queried = (collection_id, top_k)
+            return [{"text": "Evidence", "metadata": {"start": 10.0, "end": 20.0}}]
+
+    vector_store = VectorStore()
+    rag = type(
+        "Rag",
+        (),
+        {
+            "blob_store": BlobStore(),
+            "embedder": Embedder(),
+            "vector_store": vector_store,
+        },
+    )()
+    row = EvaluationRow(video_id, "What happened?", ("event",), 10.0, 20.0)
+    candidates = collect_candidates(rag, row, database.session_factory)
+
+    assert candidates[0]["text"] == "Evidence"
+    assert vector_store.queried == (asset_id, 5)
+    database.dispose()

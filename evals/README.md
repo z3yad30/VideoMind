@@ -16,7 +16,10 @@ Each non-empty line must be a JSON object with this shape:
 {"video_id":"32-character-video-id","question":"What was the conclusion?","expected_answer_keywords":["conclusion","result"],"expected_start_s":125.0,"expected_end_s":151.5}
 ```
 
-- `video_id` identifies a video whose transcript and vector collection exist.
+- `video_id` is the API-facing video ID from the videos table. For uploaded
+  videos, the harness resolves it to the shared `asset_id` used by transcript
+  files and the Chroma collection; YouTube video IDs resolve to themselves.
+  The matching transcript and vector collection must exist locally.
 - `question` is the natural-language retrieval query.
 - `expected_answer_keywords` records expected answer content for human review;
   it is not part of the temporal ranking metrics.
