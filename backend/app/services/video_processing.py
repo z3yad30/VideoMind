@@ -58,6 +58,9 @@ class VideoProcessingService:
     def enqueue(self, video_id: str) -> JobRecord:
         return self.job_queue.enqueue(video_id)
 
+    def mark_completed(self, video_id: str) -> JobRecord:
+        return self.job_queue.mark_completed(video_id)
+
     def get_job(self, video_id: str) -> VideoJob | None:
         job = self.job_queue.get_job(video_id)
         if job is None:
@@ -87,14 +90,14 @@ class VideoProcessingService:
         else:
             active = next((str(stage["id"]) for stage in stages if stage["status"] == "running"), None)
             status = active or job.stage or "validating"
-        return VideoJob(job.video_id, status, job.updated_at, job.error, stages)
+        return VideoJob(video_id, status, job.updated_at, job.error, stages)
 
     def get_events(self, video_id: str, last_event_id: int = 0) -> list[dict[str, object]]:
         job = self.job_queue.get_job(video_id)
         if job is None:
             return []
         return [
-            {"id": event.id, **event.payload_json}
+            {"id": event.id, **{**event.payload_json, "video_id": video_id}}
             for event in self.job_queue.events_since(job.id, last_event_id)
         ]
 
@@ -113,7 +116,8 @@ class VideoProcessingService:
         source_url: str | None = None,
     ) -> None:
         video_id = job.video_id
-        media_path = media_path or self._find_source(video_id, required=False)
+        artifact_id = job.asset_id or video_id
+        media_path = media_path or self._find_source(artifact_id, required=False, blob_key=job.blob_key)
         source_url = source_url or job.source_url
         active_stage = "validating"
         try:
@@ -151,13 +155,13 @@ class VideoProcessingService:
             execute_stage(
                 "validating",
                 "Media source accepted",
-                lambda: self._validate_source(video_id, media_path, source_url),
+                lambda: self._validate_source(artifact_id, media_path, source_url, job.blob_key),
             )
 
             if source_url:
                 def download() -> None:
                     nonlocal media_path
-                    existing = self._find_source(video_id, required=False)
+                    existing = self._find_source(artifact_id, required=False, blob_key=job.blob_key)
                     if existing is not None:
                         media_path = existing
                         return
@@ -172,16 +176,16 @@ class VideoProcessingService:
             def extract_audio() -> None:
                 nonlocal media_path
                 if media_path is None:
-                    source_path = self._find_source(video_id, required=True)
+                    source_path = self._find_source(artifact_id, required=True, blob_key=job.blob_key)
                     if source_path is None:
                         raise MediaProcessingError("Video source file is unavailable")
                     media_path = source_path
-                key = f"audio/extracted/{video_id}.wav"
+                key = f"audio/extracted/{artifact_id}.wav"
                 with temporary_directory() as temp_dir:
                     extracted_path = self.media.extract_audio(media_path, Path(temp_dir))
                     self.blob_store.put(key, extracted_path)
 
-            audio_key = f"audio/extracted/{video_id}.wav"
+            audio_key = f"audio/extracted/{artifact_id}.wav"
             execute_stage("extracting_audio", "Audio extracted", extract_audio, output_key=audio_key)
             execute_stage(
                 "detecting_language",
@@ -189,7 +193,7 @@ class VideoProcessingService:
                 skip_message="Language detection is provided by transcription",
             )
 
-            transcript_key = f"transcripts/{video_id}.json"
+            transcript_key = f"transcripts/{artifact_id}.json"
 
             def transcribe() -> None:
                 if not self.blob_store.exists(audio_key):
@@ -197,7 +201,7 @@ class VideoProcessingService:
                 segments = self.transcriber.transcribe(self.blob_store.open(audio_key))
                 if not segments:
                     raise MediaProcessingError("Transcription produced no speech segments")
-                self._write_transcript(video_id, segments)
+                self._write_transcript(artifact_id, segments)
 
             execute_stage("transcribing", "Transcription completed", transcribe, output_key=transcript_key)
             execute_stage(
@@ -210,11 +214,11 @@ class VideoProcessingService:
                 for stage_id, _ in STAGES[6:]:
                     execute_stage(stage_id, "Optional enrichment is not configured", skip_message="Optional enrichment is not configured")
             else:
-                chunks_key = f"transcripts/{video_id}.chunks.json"
+                chunks_key = f"transcripts/{artifact_id}.chunks.json"
                 chunks: list[dict[str, object]] = []
 
                 def build_chunks() -> None:
-                    chunks.extend(self.ai.prepare_transcript_chunks(video_id))
+                    chunks.extend(self.ai.prepare_transcript_chunks(artifact_id))
                     self.blob_store.put(chunks_key, json.dumps({"chunks": chunks}))
                     self._emit_progress(video_id, "chunking", len(chunks), len(chunks), job.id)
 
@@ -225,7 +229,7 @@ class VideoProcessingService:
                         raise MediaProcessingError("Invalid transcript chunks checkpoint")
                     chunks = stored_chunks
 
-                embeddings_key = f"transcripts/{video_id}.embeddings.json"
+                embeddings_key = f"transcripts/{artifact_id}.embeddings.json"
                 embeddings: list[list[float]] = []
 
                 def embed_chunks() -> None:
@@ -248,7 +252,7 @@ class VideoProcessingService:
 
                 def index_chunks() -> None:
                     self.ai.index_transcript_chunks(
-                        video_id,
+                        artifact_id,
                         chunks,
                         embeddings,
                         self._rag_progress(video_id, job.id),
@@ -256,12 +260,12 @@ class VideoProcessingService:
 
                 execute_stage("indexing", "Knowledge indexed", index_chunks)
 
-                summary_key = f"summaries/{video_id}.json"
+                summary_key = f"summaries/{artifact_id}.json"
                 summary: dict[str, str] = {}
 
                 def summarize() -> None:
                     summary.update(self.ai.generate_summary(chunks))
-                    self.ai.save_summary(video_id, summary)
+                    self.ai.save_summary(artifact_id, summary)
 
                 execute_stage("summarizing", "Summary generated", summarize, output_key=summary_key)
                 if not summary and self.blob_store.exists(summary_key):
@@ -272,11 +276,11 @@ class VideoProcessingService:
                         raise MediaProcessingError("Invalid summary checkpoint")
                     summary = {str(key): str(value) for key, value in loaded.items()}
 
-                audio_summary_key = f"audio/summaries/{video_id}.wav"
+                audio_summary_key = f"audio/summaries/{artifact_id}.wav"
                 execute_stage(
                     "generating_summary_audio",
                     "Voice summary ready",
-                    lambda: self.ai.generate_summary_audio(video_id, summary),
+                    lambda: self.ai.generate_summary_audio(artifact_id, summary),
                     output_key=audio_summary_key,
                 )
 
@@ -303,18 +307,33 @@ class VideoProcessingService:
             return None
         return json.loads(self.blob_store.open(key).read_text(encoding="utf-8"))["segments"]
 
-    def _validate_source(self, video_id: str, media_path: Path | None, source_url: str | None) -> None:
+    def _validate_source(
+        self,
+        video_id: str,
+        media_path: Path | None,
+        source_url: str | None,
+        blob_key: str | None = None,
+    ) -> None:
         if source_url:
             return
-        source = media_path or self._find_source(video_id, required=True)
+        source = media_path or self._find_source(video_id, required=True, blob_key=blob_key)
         if hasattr(self.media, "validate_filename"):
             self.media.validate_filename(source.name)
 
-    def _find_source(self, video_id: str, required: bool) -> Path | None:
-        media_dir = self.blob_store.open(f"videos/{video_id}").parent
+    def _find_source(
+        self,
+        asset_id: str,
+        required: bool,
+        blob_key: str | None = None,
+    ) -> Path | None:
+        if blob_key:
+            path = self.blob_store.open(blob_key)
+            if path.is_file():
+                return path
+        media_dir = self.blob_store.open(f"videos/{asset_id}").parent
         matches = sorted(
             path
-            for path in media_dir.glob(f"{video_id}.*")
+            for path in media_dir.glob(f"{asset_id}.*")
             if path.is_file()
             and path.suffix.lower() in getattr(self.media, "supported_extensions", MediaService.supported_extensions)
         )

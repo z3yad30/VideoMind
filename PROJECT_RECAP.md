@@ -18,7 +18,7 @@ flowchart LR
     Jobs --> Media[Upload or yt-dlp, then FFmpeg]
     Media --> ASR[faster-whisper]
     ASR --> Transcript[Timestamped transcript JSON]
-    Transcript --> RAG[Per-video Chroma collection]
+    Transcript --> RAG[Per-asset Chroma collection]
     RAG --> LLM[Groq summaries and grounded answers]
     LLM --> TTS[Local pyttsx3 WAV]
     Browser -->|authenticated video requests| API
@@ -32,12 +32,12 @@ flowchart LR
 | `backend/app/ports/`, `backend/app/adapters/`, `backend/app/container.py` | Define external dependency protocols, local concrete adapters, and the single application composition root. |
 | `backend/app/api/auth.py`, `dependencies.py` | Registration, login, `/auth/me`, logout, and current-session dependency. |
 | `backend/app/api/chats.py` | Authenticated chat CRUD, Q&A, answer-audio generation/playback. |
-| `backend/app/api/videos.py` | Authenticated upload, YouTube, status/SSE, media, transcript, summary, question, and audio routes. |
+| `backend/app/api/videos.py`, `backend/app/api/account.py` | Authenticated ingestion, status/SSE, media, transcript, summary, question/audio, video deletion, and account-data deletion routes. |
 | `backend/app/db/`, `backend/app/repositories/`, `backend/migrations/` | SQLAlchemy models, SQLite connection setup, repositories, and Alembic schema migration. |
 | `backend/app/adapters/sql_job_queue.py`, `backend/worker.py` | Atomic database job claims, heartbeats, stale recovery, and configurable embedded/external workers. |
 | `backend/app/services/auth.py`, `user_storage.py` | Argon2 password handling and database-backed user/session access; session tokens are stored as hashes. |
 | `backend/app/services/chat_storage.py` | Database-backed chat persistence and canonical video-context hydration. |
-| `backend/app/services/video_storage.py` | Database-backed video-ID ownership. |
+| `backend/app/services/video_storage.py`, `asset_cleanup.py` | Per-video ownership, shared asset lookup, and last-reference artifact cleanup. |
 | `backend/app/services/video_processing.py`, `media.py` | Idempotent, checkpointed processing stages and timestamped transcription orchestration. |
 | `backend/app/services/rag.py` | Timestamp-preserving chunks, injected vector and embedding ports, similarity filtering, transcript fallback selection. |
 | `backend/app/services/llm.py`, `voice.py` | Injected LLM/TTS ports, grounded Q&A and summaries, and voice-question flow. |
@@ -47,6 +47,7 @@ flowchart LR
 | `frontend/src/api.ts`, `styles.css` | Typed cookie-backed requests and shared responsive/theme styling. |
 | `scripts/vanish.py` | Standalone runtime-data cleanup and empty SQLite schema recreation. |
 | `scripts/migrate_json_to_db.py` | Idempotent importer for legacy user, chat, and video-owner JSON. |
+| `scripts/migrate_videos_to_assets.py` | Idempotent SHA-256 migration for existing video rows and local artifacts. |
 
 Business services depend on ports rather than concrete adapters. FastAPI dependencies read the composed services from `backend/app/container.py`; the local blob adapter continues to store runtime artifacts under the same `data/` paths.
 
@@ -56,20 +57,22 @@ Business services depend on ports rather than concrete adapters. FastAPI depende
 - Login sets an HTTP-only, SameSite=Lax cookie. Session IDs are random; only their SHA-256 hashes are stored in SQL, with a 12-hour expiration.
 - `/auth/me` restores a session after refresh. The frontend does not store passwords or session identifiers in local storage. Only the selected theme is stored in `videomind.theme`.
 - Chats, messages, and message sources are stored in relational tables; message and source rows cascade on chat deletion. Reads, updates, deletes, message writes, and chat answer-audio access use the authenticated username; foreign chat IDs return `404`.
-- Upload and YouTube routes assign the new video ID to the authenticated user in SQL before processing. All video routes, including SSE, media playback, transcript, summary, voice audio, and Q&A, check ownership. Creating or updating a chat also checks its video association.
+- Upload and YouTube routes assign the new video ID to the authenticated user in SQL before processing. Identical uploaded files share a `media_assets` record and canonical blob, while ownership remains attached to each distinct video row. All video routes, including SSE, media playback, transcript, summary, voice audio, and Q&A, check ownership. Creating or updating a chat also checks its video association.
 - Legacy owner mappings can be imported from `data/videos/.owners.json`; unowned artifacts are not auto-claimed.
 - Sessions remain durable across application restarts; only SHA-256 token hashes are persisted, with expired sessions purged at startup and hourly. Cookie Secure behavior follows `COOKIE_SECURE` (defaults on for `APP_ENV=production`) and unsafe methods enforce the configured Origin/Referer allowlist. SlowAPI's in-memory limiter provides configurable login, registration, ingestion, and question limits. Uploads are magic-byte checked and duration-probed; YouTube inputs are host-restricted, playlist-disabled, and subprocess-time-limited. Per-user video and total-minute quotas are configured through environment settings.
 
 ## Video and Chat Workflows
 
-1. `POST /videos/upload` or `POST /videos/youtube` returns `202` and a generated 32-character lowercase hexadecimal `video_id`; both require a signed-in account and enqueue a durable job.
-2. Uploads and YouTube downloads persist their source in `data/videos/`. FFmpeg's normalized audio is checkpointed at `data/audio/extracted/{video_id}.wav`; job state and replayable events are stored in SQL.
-3. Processing writes timestamped segments to `data/transcripts/{video_id}.json`, indexes a Chroma collection named `video_{video_id}`, writes a structured summary to `data/summaries/{video_id}.json`, and generates summary audio under `data/audio/summaries/` when dependencies are available.
+1. `POST /videos/upload` or `POST /videos/youtube` returns `202` and a generated 32-character lowercase hexadecimal `video_id`; both require a signed-in account. Uploads are hashed while streaming and identical bytes reuse their shared asset; a completed asset is returned as completed without another processing job.
+2. Upload sources persist once under `data/videos/assets/{asset_id}{extension}`; YouTube downloads remain under `data/videos/{video_id}{extension}`. FFmpeg's normalized audio is checkpointed under `data/audio/extracted/` using the asset ID for uploads or the video ID for YouTube; job state and replayable events are stored in SQL.
+3. Processing writes timestamped segments to `data/transcripts/{artifact_id}.json`, indexes a Chroma collection named `video_{artifact_id}`, writes a structured summary to `data/summaries/{artifact_id}.json`, and generates summary audio under `data/audio/summaries/` when dependencies are available. For uploads, `artifact_id` is the shared asset ID; for YouTube, it is the video ID.
 4. The embedded worker (default) or `python -m backend.worker` in external mode claims jobs from SQL, heartbeats the claim, and checkpoints each completed stage. Stale claims are re-queued; output artifacts let resumed stages skip completed work. The frontend listens to owner-checked, database-backed SSE events and refreshes status.
 5. **New Chat** creates another SQL chat using the selected, already-processed `video_id`. It does not upload, download, or reprocess the source.
 6. Reopening a chat restores the complete ordered message history. Transcript and summary are resolved from canonical video artifacts rather than copied into each chat unless supplied explicitly.
 7. Chat Q&A saves the user message, sends only the latest three prior user/assistant messages as conversational context, retrieves evidence only from that video's collection, then saves the assistant answer, timestamped sources, and optional audio reference. Full persistent history is never sent wholesale to Groq.
 8. Weak retrieval falls back to question-focused raw transcript excerpts capped at 12,000 characters. The RAG policy uses `top_k=5`, `MIN_SIMILARITY=0.70`, and `RELATIVE_MARGIN=0.10`. Sources are collapsed per answer and timestamps seek the video player.
+
+Deleting one video detaches its chats and marks them `video_missing`. It removes the canonical source, transcript, summaries, audio, and vector collection only when that video was the asset's final reference. `DELETE /me/data` removes the current user's chats, sessions, and video rows while preserving assets still referenced by another user. `scripts/migrate_videos_to_assets.py` links legacy source files by SHA-256 and cleans duplicate video-keyed artifacts; run its `--dry-run` first after backing up runtime data.
 
 Standalone video Q&A and voice-question routes share the same video-scoped RAG pipeline. Voice-question audio is temporary/query-only and is not added to the transcript index. Chat answer audio has owner-checked chat/message routes and stores only a reference in chat JSON, not WAV bytes.
 
@@ -109,7 +112,7 @@ python -m pytest
 
 Install Node.js and FFmpeg separately from Python packages. Check `node --version`, `npm --version`, and `ffmpeg -version` in a new terminal; if FFmpeg is not found, add its executable folder to Windows `PATH`. Set `GROQ_API_KEY` in the untracked local `.env`. ASR and embedding models may download on first use; local TTS requires a usable Windows SAPI voice. Tests mock external services and do not require a Groq credential.
 
-For an existing JSON installation, validate and then run `python scripts/migrate_json_to_db.py --dry-run` and `python scripts/migrate_json_to_db.py` from the repository root. Start the backend from the repository root with `.venv\Scripts\activate` followed by `uvicorn backend.app.main:app --reload`. The database defaults to `sqlite:///data/videomind.db`; set `DATABASE_URL` in `.env` to change it. In a second terminal, start Vite from `frontend\` with `npm run dev`; the configured `/api` proxy targets `http://127.0.0.1:8000`.
+For an existing JSON installation, validate and then run `python -m scripts.migrate_json_to_db --dry-run` and `python -m scripts.migrate_json_to_db` from the repository root. Start the backend from the repository root with `.venv\Scripts\activate` followed by `uvicorn backend.app.main:app --reload`. The database defaults to `sqlite:///data/videomind.db`; set `DATABASE_URL` in `.env` to change it. In a second terminal, start Vite from `frontend\` with `npm run dev`; the configured `/api` proxy targets `http://127.0.0.1:8000`.
 
 ## Known Limitations
 

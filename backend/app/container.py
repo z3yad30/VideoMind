@@ -36,12 +36,22 @@ class ApplicationContainer:
 
 
 @lru_cache(maxsize=1)
+def _get_blob_store() -> LocalBlobStore:
+    return LocalBlobStore(settings.project_root / "data")
+
+
+@lru_cache(maxsize=1)
+def _get_vector_store() -> ChromaVectorStore:
+    return ChromaVectorStore(settings.project_root / "data" / "chroma")
+
+
+@lru_cache(maxsize=1)
 def get_container() -> ApplicationContainer:
     job_queue = SqlJobQueue(get_database().session_factory)
-    blob_store = LocalBlobStore(settings.project_root / "data")
+    blob_store = _get_blob_store()
     transcriber = FasterWhisperTranscriber()
     embedder = SentenceTransformerEmbedder()
-    vector_store = ChromaVectorStore(settings.project_root / "data" / "chroma")
+    vector_store = _get_vector_store()
     llm_client = GroqLLMClient()
     tts = Pyttsx3TTS()
     media = MediaService()
@@ -66,7 +76,7 @@ def get_container() -> ApplicationContainer:
 
 
 def get_blob_store() -> LocalBlobStore:
-    return get_container().blob_store
+    return _get_blob_store()
 
 
 def get_ai_service() -> VideoAIService:
@@ -83,3 +93,7 @@ def get_voice_service() -> VoiceQuestionService:
 
 def get_media_service() -> MediaService:
     return get_container().media
+
+
+def get_vector_store() -> ChromaVectorStore:
+    return _get_vector_store()

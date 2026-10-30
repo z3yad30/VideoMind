@@ -89,6 +89,35 @@ def test_events_since_replays_only_ids_after_cursor(tmp_path) -> None:
         database.dispose()
 
 
+def test_shared_asset_status_prefers_the_current_retry_job(tmp_path) -> None:
+    database = create_database(tmp_path)
+    seed_user(database, "alice")
+    seed_user(database, "bob")
+    seed_user(database, "carol")
+    repository = VideoRepo(database.session_factory)
+    first = repository.register_upload("a" * 32, "alice", "d" * 64, 10, 5.0, ".mp4")
+    repository.register_upload("b" * 32, "bob", "d" * 64, 10, 5.0, ".mp4")
+    repository.register_upload("c" * 32, "carol", "d" * 64, 10, 5.0, ".mp4")
+    queue = SqlJobQueue(database.session_factory)
+    original = queue.enqueue("a" * 32)
+    original_claim = queue.claim_next("worker-a")
+    assert original_claim is not None
+    assert queue.fail(original.id, "worker-a", "transient failure")
+    retry = queue.enqueue("b" * 32)
+    retry_claim = queue.claim_next("worker-b")
+    assert retry_claim is not None and retry_claim.id == retry.id
+
+    try:
+        assert first.asset_id is not None
+        assert repository.asset_id_for_video("c" * 32, "carol") == first.asset_id
+        shared = queue.get_job("c" * 32)
+        retried = queue.get_job("a" * 32)
+        assert shared is not None and shared.state == "running"
+        assert retried is not None and retried.video_id == "b" * 32
+    finally:
+        database.dispose()
+
+
 def test_worker_loop_claims_and_processes_a_queued_job() -> None:
     queue = FakeJobQueue()
     job = queue.enqueue("video")

@@ -1,8 +1,10 @@
+import hashlib
 import subprocess
 import json
 import math
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -13,12 +15,34 @@ class MediaProcessingError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class UploadFingerprint:
+    sha256: str
+    size: int
+
+
 class MediaService:
     supported_extensions = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".mp3", ".wav", ".m4a", ".flac", ".ogg"}
 
     def save_upload(self, source, destination: Path) -> None:
+        self._save_upload(source, destination, fingerprint=False)
+
+    def save_upload_with_digest(self, source, destination: Path) -> UploadFingerprint:
+        result = self._save_upload(source, destination, fingerprint=True)
+        if result is None:
+            raise RuntimeError("Upload fingerprint was not produced")
+        return result
+
+    def _save_upload(
+        self,
+        source,
+        destination: Path,
+        *,
+        fingerprint: bool,
+    ) -> UploadFingerprint | None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         total = 0
+        digest = hashlib.sha256() if fingerprint else None
         try:
             with destination.open("wb") as output:
                 while chunk := source.file.read(1024 * 1024):
@@ -26,7 +50,10 @@ class MediaService:
                     if total > settings.max_upload_bytes:
                         raise MediaProcessingError("Uploaded file exceeds the maximum allowed size")
                     output.write(chunk)
+                    if digest is not None:
+                        digest.update(chunk)
             self.validate_magic(destination)
+            return UploadFingerprint(digest.hexdigest(), total) if digest is not None else None
         except Exception:
             destination.unlink(missing_ok=True)
             raise

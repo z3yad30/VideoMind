@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -41,6 +42,18 @@ class LocalBlobStore:
 
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
+
+    def delete_prefix(self, prefix: str) -> None:
+        path = self._path(prefix)
+        if path.is_dir() and not path.is_symlink():
+            for child in path.iterdir():
+                if child.is_symlink() or child.is_file():
+                    child.unlink()
+                elif child.is_dir():
+                    shutil.rmtree(child)
+            path.rmdir()
+        elif path.is_file() or path.is_symlink():
+            path.unlink()
 
     def _path(self, key: str) -> Path:
         relative = Path(key)

@@ -68,6 +68,15 @@ class ChromaVectorStore:
             candidates.append({"text": text, "metadata": item_metadata, "distance": distance, "similarity": similarity})
         return candidates
 
+    def exists(self, video_id: str) -> bool:
+        try:
+            self.client.get_collection(self.collection_name(video_id))
+            return True
+        except Exception as exc:
+            if exc.__class__.__name__ in {"InvalidCollectionException", "NotFoundError"}:
+                return False
+            raise
+
     def delete_video(self, video_id: str) -> None:
         name = self.collection_name(video_id)
         try:

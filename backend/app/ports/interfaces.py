@@ -24,6 +24,8 @@ class VectorStore(Protocol):
 
     def query(self, video_id: str, embedding: list[float], top_k: int) -> list[dict[str, object]]: ...
 
+    def exists(self, video_id: str) -> bool: ...
+
     def delete_video(self, video_id: str) -> None: ...
 
 
@@ -44,6 +46,8 @@ class BlobStore(Protocol):
 
     def delete(self, key: str) -> None: ...
 
+    def delete_prefix(self, prefix: str) -> None: ...
+
 
 @dataclass(frozen=True)
 class JobRecord:
@@ -59,6 +63,8 @@ class JobRecord:
     updated_at: datetime
     source_type: str
     source_url: str | None
+    asset_id: str | None = None
+    blob_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +98,8 @@ class JobQueue(Protocol):
     ) -> bool: ...
 
     def complete(self, job_id: str, worker_id: str) -> bool: ...
+
+    def mark_completed(self, video_id: str) -> JobRecord: ...
 
     def fail(self, job_id: str, worker_id: str, error: str) -> bool: ...
 

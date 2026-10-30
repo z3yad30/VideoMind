@@ -7,7 +7,7 @@ from sqlalchemy import case, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session as OrmSession, selectinload
 
-from backend.app.db.models import Chat, Message, MessageSource, User
+from backend.app.db.models import Chat, Message, MessageSource, User, Video
 from backend.app.schemas.chats import ChatCreate, ChatMessage, ChatRecord, ChatUpdate, utc_now
 
 
@@ -103,6 +103,8 @@ class ChatRepo:
                 for key in ("video_id", "title", "video_metadata", "summary", "transcript"):
                     if key in changes:
                         setattr(chat, key, changes[key])
+                if changes.get("video_id"):
+                    chat.video_missing = False
                 if request.messages is not None:
                     self._replace_messages(session, chat, request.messages)
                 chat.updated_at = now
@@ -190,6 +192,21 @@ class ChatRepo:
                 session.delete(chat)
         except ChatNotFoundError:
             raise
+        except SQLAlchemyError as exc:
+            raise ChatStoreError("Chat storage is unavailable") from exc
+
+    def asset_id_for_video(self, username: str, video_id: str) -> str | None:
+        try:
+            with self.session_factory() as session:
+                return session.scalar(
+                    select(Video.asset_id)
+                    .join(Chat, Chat.video_id == Video.id)
+                    .join(User, Chat.user_id == User.id)
+                    .where(
+                        Chat.video_id == video_id,
+                        User.username == username.casefold(),
+                    )
+                )
         except SQLAlchemyError as exc:
             raise ChatStoreError("Chat storage is unavailable") from exc
 
@@ -297,6 +314,7 @@ class ChatRepo:
             created_at=created_at,
             updated_at=updated_at,
             video_id=chat.video_id,
+            video_missing=chat.video_missing,
             video_metadata=chat.video_metadata,
             summary=chat.summary,
             transcript=chat.transcript,

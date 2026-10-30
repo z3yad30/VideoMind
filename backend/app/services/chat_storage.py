@@ -90,8 +90,13 @@ class ChatStore:
     def _load_video_context(self, record: ChatRecord) -> ChatRecord:
         if not record.video_id:
             return record
-        summary = record.summary or self._read_artifact("summaries", record.video_id, "summary")
-        transcript = record.transcript or self._read_artifact("transcripts", record.video_id)
+        try:
+            asset_id = self.repository.asset_id_for_video(record.username, record.video_id)
+        except ChatRepoError as exc:
+            raise ChatStoreError("Chat storage is unavailable") from exc
+        artifact_id = asset_id or record.video_id
+        summary = record.summary or self._read_artifact("summaries", artifact_id, "summary")
+        transcript = record.transcript or self._read_artifact("transcripts", artifact_id)
         return record.model_copy(update={"summary": summary, "transcript": transcript})
 
     def _read_artifact(self, directory: str, video_id: str, key: str | None = None):

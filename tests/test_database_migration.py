@@ -57,6 +57,12 @@ def test_alembic_upgrade_creates_schema_on_temporary_database(
         assert "duration_s" in {
             column["name"] for column in inspect(database.engine).get_columns("videos")
         }
+        assert "status" in {
+            column["name"] for column in inspect(database.engine).get_columns("media_assets")
+        }
+        assert "video_missing" in {
+            column["name"] for column in inspect(database.engine).get_columns("chats")
+        }
     finally:
         database.dispose()
 

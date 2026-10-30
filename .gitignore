@@ -24,6 +24,8 @@ frontend/.env.*
 /data/summaries/*
 /data/chroma/*
 /data/users/*
+/data/chats/*
+/data/videomind.db*
 
 # Keep the runtime data directories in the project tree
 !/data/videos/.gitkeep
@@ -31,3 +33,4 @@ frontend/.env.*
 !/data/transcripts/.gitkeep
 !/data/summaries/.gitkeep
 !/data/chroma/.gitkeep
+!/data/chats/.gitkeep

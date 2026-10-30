@@ -98,6 +98,7 @@ class ChatRecord(BaseModel):
     created_at: datetime
     updated_at: datetime
     video_id: str | None = None
+    video_missing: bool = False
     video_metadata: dict[str, Any] | None = None
     summary: dict[str, str] | None = None
     transcript: dict[str, Any] | None = None
@@ -111,3 +112,4 @@ class ChatListItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     video_id: str | None = None
+    video_missing: bool = False

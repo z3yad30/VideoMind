@@ -34,6 +34,15 @@ class FakeBlobStore:
     def delete(self, key: str) -> None:
         (self.data_dir / key).unlink(missing_ok=True)
 
+    def delete_prefix(self, prefix: str) -> None:
+        path = self.data_dir / prefix
+        if path.is_dir():
+            import shutil
+
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+
     def write_transcript(self, video_id: str, segments: list[dict[str, object]]) -> None:
         self.put(f"transcripts/{video_id}.json", json.dumps({"video_id": video_id, "segments": segments}))
 
@@ -98,6 +107,12 @@ class FakeJobQueue:
 
     def complete(self, job_id: str, worker_id: str) -> bool:
         return self._update_owned(job_id, worker_id, state="completed", locked_by=None, locked_at=None)
+
+    def mark_completed(self, video_id: str) -> JobRecord:
+        job = self.enqueue(video_id)
+        completed = replace(job, state="completed")
+        self.jobs[job.id] = completed
+        return completed
 
     def fail(self, job_id: str, worker_id: str, error: str) -> bool:
         return self._update_owned(job_id, worker_id, state="failed", error=error, locked_by=None, locked_at=None)
@@ -177,6 +192,9 @@ class FakeVectorStore:
     def query(self, video_id: str, embedding: list[float], top_k: int) -> list[dict[str, object]]:
         self.queries.append((video_id, embedding, top_k))
         return [chunk for chunk in self.results if chunk.get("metadata", {}).get("video_id", video_id) == video_id][:top_k]
+
+    def exists(self, video_id: str) -> bool:
+        return video_id in self.chunks
 
     def delete_video(self, video_id: str) -> None:
         self.chunks.pop(video_id, None)

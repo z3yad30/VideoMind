@@ -106,6 +106,13 @@ def _require_video_owner(video_id: str | None, username: str) -> None:
         raise HTTPException(status_code=404, detail="Video not found")
 
 
+def _asset_id_for_video(video_id: str, username: str) -> str:
+    try:
+        return video_ownership.asset_id_for_video(video_id, username) or video_id
+    except VideoOwnershipError as exc:
+        raise HTTPException(status_code=503, detail="Video storage is unavailable") from exc
+
+
 @router.get("", response_model=list[ChatListItem])
 def list_chats(user: AuthenticatedUser = Depends(get_current_user)) -> list[ChatListItem]:
     try:
@@ -146,6 +153,7 @@ async def ask_in_chat(
         raise HTTPException(status_code=404, detail="Video not found")
     if job.status != "completed":
         raise HTTPException(status_code=409, detail="Video processing is not complete")
+    asset_id = _asset_id_for_video(chat.video_id, user.username)
 
     question = request.question.strip()
     if not question:
@@ -164,7 +172,7 @@ async def ask_in_chat(
     try:
         result = await run_in_threadpool(
             ai_service.answer_question,
-            chat.video_id,
+            asset_id,
             question,
             history=history,
         )
@@ -180,7 +188,7 @@ async def ask_in_chat(
     )
     audio_location = None
     try:
-        answer_id, _ = await run_in_threadpool(voice_service.synthesize_answer, chat.video_id, str(result["answer"]))
+        answer_id, _ = await run_in_threadpool(voice_service.synthesize_answer, asset_id, str(result["answer"]))
         audio_location = _chat_audio_location(chat_id, assistant_message.id, answer_id)
         assistant_message = assistant_message.model_copy(update={"answer_audio_ref": audio_location})
     except RuntimeError:
@@ -214,7 +222,8 @@ async def generate_chat_answer_audio(
         chat, message = _owned_message(chat_id, message_id, user.username)
         answer_id = _message_answer_id(chat_id, message_id, message.answer_audio_ref)
         if answer_id:
-            audio_path = _answer_audio_path(str(chat.video_id), answer_id, blob_store)
+            asset_id = _asset_id_for_video(chat.video_id, user.username)
+            audio_path = _answer_audio_path(asset_id, answer_id, blob_store)
             if audio_path and audio_path.is_file():
                 return {"answer_audio_ref": message.answer_audio_ref or ""}
         if not chat.video_id or not re.fullmatch(r"[0-9a-f]{32}", chat.video_id):
@@ -224,13 +233,14 @@ async def generate_chat_answer_audio(
             raise HTTPException(status_code=404, detail="Video not found")
         if job.status != "completed":
             raise HTTPException(status_code=409, detail="Video processing is not complete")
+        asset_id = _asset_id_for_video(chat.video_id, user.username)
         try:
             answer_id, audio_path = await run_in_threadpool(
-                voice_service.synthesize_answer, chat.video_id, message.content
+                voice_service.synthesize_answer, asset_id, message.content
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        expected_path = _answer_audio_path(chat.video_id, answer_id, blob_store)
+        expected_path = _answer_audio_path(asset_id, answer_id, blob_store)
         if expected_path is None or not audio_path.is_file() or audio_path.is_symlink():
             raise HTTPException(status_code=503, detail="TTS did not produce an audio file")
         try:
@@ -263,7 +273,8 @@ def get_chat_answer_audio(
     job = video_service.get_job(chat.video_id)
     if job is None or job.status != "completed":
         raise HTTPException(status_code=404, detail="Answer audio not found")
-    audio_path = _answer_audio_path(chat.video_id, answer_id, blob_store)
+    asset_id = _asset_id_for_video(chat.video_id, user.username)
+    audio_path = _answer_audio_path(asset_id, answer_id, blob_store)
     if audio_path is None or not audio_path.is_file():
         raise HTTPException(status_code=404, detail="Answer audio not found")
     return FileResponse(audio_path, media_type="audio/wav", filename=f"{answer_id}.wav")

@@ -455,10 +455,10 @@ async def test_video_upload_and_youtube_jobs_are_persistently_owned(
             return ".mp4"
 
         @staticmethod
-        def save_upload(file, destination: Path) -> Path:
+        def save_upload_with_digest(file, destination: Path) -> SimpleNamespace:
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(file.file.read())
-            return destination
+            return SimpleNamespace(sha256="a" * 64, size=5)
 
         @staticmethod
         def get_duration(_path: Path) -> float:

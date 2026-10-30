@@ -9,18 +9,18 @@ The backend and Vite frontend are implemented. The application requires a userna
 The pipeline is:
 
 1. Upload a video/audio file or submit a YouTube URL.
-2. Persist the source under `data/videos/{video_id}{extension}` for both uploads and YouTube downloads, and record its authenticated owner in the local SQL database.
-3. Extract audio with FFmpeg and retain the normalized intermediate at `data/audio/extracted/{video_id}.wav` for resumable processing.
+2. Hash uploaded files while streaming. Identical uploads share a `media_assets` row and canonical blob, while each account keeps a distinct, owner-checked `video_id`. YouTube downloads remain keyed by their video ID.
+3. Extract audio with FFmpeg and retain the normalized intermediate at `data/audio/extracted/{asset_id}.wav` for uploaded assets, or `{video_id}.wav` for YouTube jobs.
 4. Transcribe audio with configurable `faster-whisper`.
 5. Persist timestamped transcript segments.
 6. Chunk transcript segments while preserving timestamps.
 7. Embed chunks with configurable local Sentence Transformers models.
-8. Store chunks in a ChromaDB collection isolated by `video_id`.
+8. Store chunks in a ChromaDB collection isolated by `asset_id` (or `video_id` for YouTube jobs).
 9. Generate a structured summary with Groq, using hierarchical summarization for long transcripts.
 10. Generate summary and answer audio through a replaceable TTS service.
 11. Answer questions using a bounded video-scoped retrieval flow: top 5 candidates, dynamic similarity filtering, and fallback to question-focused raw transcript excerpts when transcript evidence is too weak.
 
-The important behavior change is that YouTube downloads are no longer temporary: the saved source remains in `data/videos/` after processing completes and is served through the backend media route for playback.
+YouTube downloads remain in `data/videos/` after processing completes. Uploaded source media and derived transcript, index, summary, and audio artifacts are shared by content-addressed asset, while API responses and ownership checks continue to use each user's video ID.
 
 The backend uses FastAPI and Uvicorn. External service boundaries are defined as protocols in `backend/app/ports/`, with local implementations in `backend/app/adapters/`. `backend/app/container.py` composes those adapters and the injected services; API routes obtain services through FastAPI dependencies. The local blob adapter retains the existing `data/` directory layout.
 
@@ -41,7 +41,7 @@ The backend uses FastAPI and Uvicorn. External service boundaries are defined as
 ```text
 backend/app/       API, services, models, schemas, core, utilities, database
 frontend/           React/Vite application with login, registration, and video workspace
-data/               Local runtime media, video-owner index, transcript, summary, Chroma, chat, and user storage
+data/               Local runtime media/assets, transcript, summary, Chroma, chat, and user storage
 tests/              Unit and integration tests
 .venv/              Project-root Python virtual environment
 requirements.txt    Runtime and test dependencies
@@ -139,13 +139,13 @@ The backend provides username/password registration, login, session inspection, 
 - `GET /auth/me` returns the authenticated username and responds with `401` when no valid session exists.
 - `POST /auth/logout` invalidates the current session and clears its cookie.
 
-Users and hashed session identifiers are stored in the SQL database. Passwords are hashed with Argon2 through `pwdlib`; plaintext passwords and password hashes are not returned by the API. The database defaults to `sqlite:///data/videomind.db`; SQLite uses WAL, foreign keys, and a configurable busy timeout. Set `DATABASE_URL` in `.env` to select another SQLAlchemy-supported database URL. User records, sessions, video ownership, and chats are database-backed, while transcript, summary, audio, media, and Chroma data retain their existing filesystem layout.
+Users and hashed session identifiers are stored in the SQL database. Passwords are hashed with Argon2 through `pwdlib`; plaintext passwords and password hashes are not returned by the API. The database defaults to `sqlite:///data/videomind.db`; SQLite uses WAL, foreign keys, and a configurable busy timeout. Set `DATABASE_URL` in `.env` to select another SQLAlchemy-supported database URL. User records, sessions, video ownership, media-asset deduplication, and chats are database-backed, while transcript, summary, audio, media, and Chroma data retain their local filesystem layout.
 
 The frontend opens on a login screen and offers account registration. Registration validates the username and password confirmation, creates the account through `POST /auth/register`, then signs in through `POST /auth/login`. Existing users can sign in directly. Passwords are sent only to the backend over the configured API connection; the frontend does not save passwords in localStorage. After sign-in, the chatbot workspace loads the authenticated user's saved chats from the backend.
 
 On startup, the frontend calls `GET /auth/me` and only mounts the VideoMind workspace when a valid session is returned. Login sets an HTTP-only, SameSite=Lax session cookie that the browser attaches to subsequent API requests, including after a page refresh. Sessions are random server-side identifiers and expire after 12 hours; the database stores only a hash of each session identifier. A protected API `401` returns the frontend to login, and logout calls `POST /auth/logout` to invalidate the session and clear the cookie.
 
-Chat and video routes require this authenticated session. Uploaded and YouTube-processed videos are assigned to the authenticated account in the database. Video status, SSE events, media, transcript, summary, voice answers, and Q&A all check ownership. Chats can only reference videos owned by the current user. Chat answer audio is separately checked against the owning chat and assistant message. Unknown and foreign resource IDs return `404`.
+Chat and video routes require this authenticated session. Uploaded and YouTube-processed videos are assigned to the authenticated account in the database. Identical uploads share one asset, but video status, SSE events, media, transcript, summary, voice answers, and Q&A continue to check ownership per video row. Chats can only reference videos owned by the current user. Deleting a video keeps its chats and marks them `video_missing`; shared media is removed only after its last video reference is deleted. `DELETE /me/data` removes the current user's chats, sessions, and video rows while preserving assets still referenced by another user. Chat answer audio is separately checked against the owning chat and assistant message. Unknown and foreign resource IDs return `404`.
 
 The browser session survives page refreshes and backend restarts through the HTTP-only cookie and persistent session records; the cookie expires after 12 hours. `COOKIE_SECURE` controls HTTPS-only cookies, and unsafe methods are restricted to `ALLOWED_ORIGINS`. Configurable in-memory rate limits protect authentication, ingestion, and question routes. This remains a single-host local-first MVP; perform a deployment review before exposing it publicly. Video artifacts without an ownership record are intentionally inaccessible until assigned through a trusted migration or reprocessed under an account; do not auto-assign legacy artifacts in a multi-account installation.
 
@@ -160,17 +160,26 @@ python -m alembic upgrade head
 For an existing installation with JSON users, chats, or `data/videos/.owners.json`, first run the migration in validation-only mode, then import:
 
 ```cmd
-python scripts/migrate_json_to_db.py --dry-run
-python scripts/migrate_json_to_db.py
+python -m scripts.migrate_json_to_db --dry-run
+python -m scripts.migrate_json_to_db
 ```
 
 The importer is idempotent and leaves source JSON files unchanged. Keep a backup of runtime data before importing. New installations can skip the importer. `DATABASE_URL` defaults to `sqlite:///data/videomind.db`; `SQLITE_BUSY_TIMEOUT_MS` controls SQLite's busy timeout.
+
+After importing legacy owners and upgrading the schema, link existing local video files to shared assets. Validate first, then run the migration:
+
+```cmd
+python -m scripts.migrate_videos_to_assets --dry-run
+python -m scripts.migrate_videos_to_assets
+```
+
+The asset migration hashes source files, links duplicate videos to one canonical asset, and removes duplicate video-keyed artifacts and vector collections. Videos with no local source file are reported as skipped. Back up `data/` before running it.
 
 ## Persistent Chat Storage
 
 Chats, messages, and message sources are stored in the SQL database. A chat record contains its ID and owner, title, creation/update timestamps, optional owned video ID and metadata, summary/transcript fields, and the complete ordered message history. Message/source rows cascade when a chat is deleted.
 
-When an associated video has canonical artifacts, chat detail responses restore summary data from `data/summaries/{video_id}.json` and transcript data from `data/transcripts/{video_id}.json`, after ownership is checked. These potentially large artifacts are referenced through the video ID rather than copied into every chat unless explicitly supplied in chat content. Client-provided usernames are rejected as identity, and unknown or foreign chat/video IDs return `404`. Chat IDs are server-generated 32-character lowercase hexadecimal identifiers and path-like IDs are rejected.
+When an associated video has canonical artifacts, chat detail responses restore summary data from `data/summaries/{asset_id}.json` and transcript data from `data/transcripts/{asset_id}.json` for uploaded assets, or the video ID for YouTube jobs, after ownership is checked. These potentially large artifacts are referenced rather than copied into every chat unless explicitly supplied in chat content. Client-provided usernames are rejected as identity, and unknown or foreign chat/video IDs return `404`. Chat IDs are server-generated 32-character lowercase hexadecimal identifiers and path-like IDs are rejected. Removing a video detaches and marks its chats `video_missing` instead of deleting them.
 
 Chat API (all endpoints require the HTTP-only authenticated session cookie):
 
@@ -185,13 +194,13 @@ Chat API (all endpoints require the HTTP-only authenticated session cookie):
 
 ### Chat Question Flow
 
-`POST /chats/{chat_id}/messages` requires an authenticated owner and a chat associated with a video whose processing job is complete. The endpoint saves the user message first, then calls the same `VideoAIService.answer_question(video_id, question)` pipeline used by standalone video Q&A. Retrieval remains restricted to that video's Chroma collection and keeps the configured similarity thresholds and question-focused raw transcript fallback. A missing video returns `404`; a chat without a video returns `400`, and an unfinished video returns `409`.
+`POST /chats/{chat_id}/messages` requires an authenticated owner and a chat associated with a video whose processing job is complete. The endpoint saves the user message first, then calls the same `VideoAIService.answer_question(asset_id, question)` pipeline used by standalone video Q&A. Retrieval remains restricted to the shared asset's Chroma collection and keeps the configured similarity thresholds and question-focused raw transcript fallback. A missing video returns `404`; a chat without a video returns `400`, and an unfinished video returns `409`.
 
 The assistant reply is saved with its text, source excerpts and start/end times, a timestamp list, creation time, and an answer-audio reference when TTS succeeds. Answer audio uses the existing `VoiceQuestionService` TTS adapter. If TTS is unavailable, the text answer is still returned and persisted without an audio reference. The response includes both saved messages and the source list.
 
 Every assistant answer has its own sound control. Audio generated with the answer is played only after the user clicks; the browser does not autoplay. The control shows a loading spinner while audio is generated or fetched, changes to a pause state during playback, and reports failures with a retry action. Repeated clicks while a request is pending are ignored, and the backend serializes generation per chat message. If eager synthesis failed or a saved answer has no audio reference, the control retries through `POST /chats/{chat_id}/messages/{message_id}/audio`, which calls the same `VoiceQuestionService.synthesize_answer` implementation. Playback uses `GET /chats/{chat_id}/messages/{message_id}/audio`; this route requires the authenticated chat owner and verifies the assistant message's saved reference. The existing `GET /videos/{video_id}/answers/{answer_id}/audio` route remains available for the voice-question workflow.
 
-Chat message JSON stores only an audio URL/reference, never WAV bytes. New chat-answer references are scoped to the owning chat and message (`/chats/{chat_id}/messages/{message_id}/audio/{answer_id}`); the WAV stays under `data/audio/answers/{video_id}/{answer_id}.wav`. Thus reopening a chat restores the reference, and playback remains owner-checked. The frontend fetches the protected endpoint with the session cookie and keeps only a temporary browser object URL for playback.
+Chat message JSON stores only an audio URL/reference, never WAV bytes. New chat-answer references are scoped to the owning chat and message (`/chats/{chat_id}/messages/{message_id}/audio/{answer_id}`); the WAV stays under `data/audio/answers/{asset_id}/{answer_id}.wav` for uploaded assets, or the video ID for YouTube jobs. Thus reopening a chat restores the reference, and playback remains owner-checked. The frontend fetches the protected endpoint with the session cookie and keeps only a temporary browser object URL for playback.
 
 In the chat, each assistant reply's **Relevant transcript / Sources** section starts collapsed to keep the conversation compact. Its keyboard-accessible expand button reveals transcript excerpts and start/end timestamps; each timestamp seeks playback to that point. Expand/collapse state is independent for every reply. This changes only source presentation, not retrieval or answer generation.
 
@@ -311,6 +320,8 @@ Implemented video endpoints (all require an authenticated owner):
 - `POST /videos/{video_id}/voice-question`
 - `GET /videos/{video_id}/summary/audio`
 - `GET /videos/{video_id}/answers/{answer_id}/audio`
+- `DELETE /videos/{video_id}` (removes this user's video; shared asset cleanup waits for the last reference)
+- `DELETE /me/data` (removes this user's chats, sessions, and video rows)
 
 Upload and YouTube ingestion assign the new video ID to the current account before processing begins. Status, replayable SSE progress, media playback, transcript, summary, summary audio, typed/voice questions, and voice-answer audio reject anonymous requests and foreign owners. `GET /videos/{video_id}` is also owner-checked.
 
@@ -318,7 +329,7 @@ Long-running processing runs in the background with stage snapshots and replayab
 
 ## RAG and ChromaDB
 
-Each video receives a generated `video_id` and its own ChromaDB collection named `video_<video_id>`. Every stored chunk includes its text, `video_id`, chunk ID, source, and start/end timestamps. Question retrieval receives the selected video ID and queries only that collection.
+Each video receives a generated `video_id`. Uploaded videos with identical SHA-256 content share a canonical `asset_id` and ChromaDB collection named `video_<asset_id>`; YouTube jobs continue to use their `video_id` as the artifact key. Every stored chunk includes its text, artifact ID, chunk ID, source, and start/end timestamps. Question retrieval resolves the owned video to its asset before querying, so one user's upload cannot grant another user access to the video row.
 
 The implemented retrieval policy is:
 
@@ -327,7 +338,7 @@ The implemented retrieval policy is:
 - `RELATIVE_MARGIN = 0.10`
 - Keep only chunks with similarity >= `max(MIN_SIMILARITY, top_similarity - RELATIVE_MARGIN)` and similarity >= `MIN_SIMILARITY`
 
-This is a dynamic filter: weak results are discarded before the LLM sees them, but retrieval failure does not stop the question from being processed. If no transcript chunks pass the threshold, the system selects question-focused raw transcript excerpts from `data/transcripts/{video_id}.json`, preserving timestamps and limiting the context to 12,000 characters before asking the LLM whether the question is answerable. The structured summary remains available for display and audio, but is not used as the no-match question context.
+This is a dynamic filter: weak results are discarded before the LLM sees them, but retrieval failure does not stop the question from being processed. If no transcript chunks pass the threshold, the system selects question-focused raw transcript excerpts from the resolved asset's `data/transcripts/{asset_id}.json` (or the YouTube video ID), preserving timestamps and limiting the context to 12,000 characters before asking the LLM whether the question is answerable. The structured summary remains available for display and audio, but is not used as the no-match question context.
 
 The LLM must not invent unsupported facts. If the question is unrelated to the video or the raw transcript has insufficient evidence, the answer states that the available video context does not provide enough information. Voice-question transcriptions are query-only and are never inserted into the video's transcript collection.
 
@@ -335,7 +346,7 @@ The LLM must not invent unsupported facts. If the question is unrelated to the v
 
 Uploads are validated by size, extension, magic bytes, and probed duration before they are queued. Filenames are sanitized and never used as identifiers. YouTube URLs are limited to YouTube hosts, playlists are disabled, and yt-dlp runs with a configured timeout. Per-user video-count and total-duration quotas apply before jobs are enqueued.
 
-The actual storage model is persistent: every successfully downloaded YouTube source is saved to `data/videos/{video_id}{extension}` and remains available after the job completes. Uploaded files also use the same source-storage pattern in `data/videos/`. Extracted audio is checkpointed under `data/audio/extracted/` and intermediate chunk/embedding JSON under `data/transcripts/` so interrupted work can resume. Playback is intentionally blocked until the job reaches `completed`, at which point the frontend loads the saved source from the backend media route instead of showing a broken object URL.
+The actual storage model is persistent: every successfully downloaded YouTube source is saved to `data/videos/{video_id}{extension}` and remains available after the job completes. Upload sources are stored once under `data/videos/assets/{asset_id}{extension}`. Extracted audio, transcript/chunk/embedding JSON, summaries, summary audio, answer audio, and Chroma collections use the asset ID for uploaded media and the video ID for YouTube jobs, so processing a repeated upload reuses its existing artifacts. Playback is intentionally blocked until the job reaches `completed`, at which point the frontend loads the saved source through the owner-checked media route.
 
 Invalid URLs, unsupported media, missing FFmpeg, failed downloads, corrupted files, empty audio, and service failures still produce logged, user-facing errors without exposing secrets.
 

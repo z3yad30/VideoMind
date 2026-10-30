@@ -46,6 +46,20 @@ def test_local_blob_store_preserves_layout_and_supports_operations(tmp_path: Pat
         store.open("../outside")
 
 
+def test_local_blob_store_deletes_exact_files_and_directory_prefixes(tmp_path: Path) -> None:
+    store = LocalBlobStore(tmp_path / "data")
+    store.put("videos/abc123.mp4", b"video")
+    store.put("videos/abc123-extra.mp4", b"unrelated")
+    store.put("audio/answers/abc123/answer.wav", b"answer")
+
+    store.delete_prefix("videos/abc123.mp4")
+    store.delete_prefix("audio/answers/abc123")
+
+    assert not store.exists("videos/abc123.mp4")
+    assert store.exists("videos/abc123-extra.mp4")
+    assert not store.exists("audio/answers/abc123/answer.wav")
+
+
 def test_faster_whisper_transcriber_preserves_segments(monkeypatch: pytest.MonkeyPatch) -> None:
     class Model:
         def __init__(self, *args, **kwargs) -> None:
@@ -127,6 +141,7 @@ def test_chroma_vector_store_maps_chunks_and_scopes_queries() -> None:
 
     assert len(client.collection.stored) == 1
     assert client.collection.deleted == []
+    assert store.exists("video")
     assert store.query("video", [1.0, 0.0], 5)[0]["similarity"] == 1.0
     store.upsert("video", [])
     assert client.collection.stored == {}
@@ -187,6 +202,8 @@ def test_container_composes_services_from_adapters(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(container_module, "GroqLLMClient", lambda: llm_client)
     monkeypatch.setattr(container_module, "Pyttsx3TTS", lambda: tts)
     container_module.get_container.cache_clear()
+    container_module._get_blob_store.cache_clear()
+    container_module._get_vector_store.cache_clear()
 
     try:
         container = container_module.get_container()
@@ -198,3 +215,5 @@ def test_container_composes_services_from_adapters(monkeypatch: pytest.MonkeyPat
         assert container.voice.tts is tts
     finally:
         container_module.get_container.cache_clear()
+        container_module._get_blob_store.cache_clear()
+        container_module._get_vector_store.cache_clear()
