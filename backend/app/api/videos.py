@@ -8,8 +8,16 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 
-from backend.app.core.config import settings
+from backend.app.ports import BlobStore
+
 from backend.app.api.dependencies import get_current_user
+from backend.app.container import (
+    get_ai_service,
+    get_blob_store,
+    get_media_service,
+    get_video_processing_service,
+    get_voice_service,
+)
 from backend.app.schemas.videos import (
     QuestionRequest,
     QuestionResponse,
@@ -29,10 +37,6 @@ from backend.app.services.auth import AuthenticatedUser
 from backend.app.services.video_storage import VideoOwnershipError, video_ownership
 
 router = APIRouter(prefix="/videos", tags=["videos"])
-media_service = MediaService()
-ai_service = VideoAIService()
-video_service = VideoProcessingService(media=media_service, ai=ai_service)
-voice_service = VoiceQuestionService(ai=ai_service, media=media_service)
 _processing_tasks: set[asyncio.Task[None]] = set()
 _ARTIFACT_ID = re.compile(r"^[0-9a-f]{32}$")
 
@@ -53,16 +57,16 @@ def _register_video_owner(video_id: str, username: str) -> None:
         raise HTTPException(status_code=503, detail="Video storage is unavailable") from exc
 
 
-def _start_processing(video_id: str, media_path: Path, source_url: str | None = None) -> None:
+def _start_processing(video_service: VideoProcessingService, video_id: str, media_path: Path, source_url: str | None = None) -> None:
     task = asyncio.create_task(asyncio.to_thread(video_service.process, video_id, media_path, source_url))
     _processing_tasks.add(task)
     task.add_done_callback(_processing_tasks.discard)
 
 
-def _resolve_source_media_path(video_id: str) -> Path:
+def _resolve_source_media_path(video_id: str, blob_store: BlobStore) -> Path:
     if not _ARTIFACT_ID.fullmatch(video_id):
         raise HTTPException(status_code=404, detail="Video not found")
-    videos_dir = settings.project_root / "data" / "videos"
+    videos_dir = blob_store.open(f"videos/{video_id}").parent
     matches = sorted(path for path in videos_dir.glob(f"{video_id}.*") if path.is_file())
     for candidate in matches:
         if candidate.suffix.lower() in MediaService.supported_extensions:
@@ -71,31 +75,41 @@ def _resolve_source_media_path(video_id: str) -> Path:
 
 
 @router.post("/upload", response_model=VideoJobResponse, status_code=status.HTTP_202_ACCEPTED)
-async def upload_video(file: UploadFile = File(...), user: AuthenticatedUser = Depends(get_current_user)) -> VideoJobResponse:
+async def upload_video(
+    file: UploadFile = File(...),
+    user: AuthenticatedUser = Depends(get_current_user),
+    video_service: VideoProcessingService = Depends(get_video_processing_service),
+    media_service: MediaService = Depends(get_media_service),
+    blob_store: BlobStore = Depends(get_blob_store),
+) -> VideoJobResponse:
     try:
         suffix = media_service.validate_filename(file.filename)
         video_id = video_service.create_job()
-        source_path = settings.project_root / "data" / "videos" / f"{video_id}{suffix}"
+        source_path = blob_store.open(f"videos/{video_id}{suffix}")
         media_service.save_upload(file, source_path)
         _register_video_owner(video_id, user.username)
     except MediaProcessingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         await file.close()
-    _start_processing(video_id, source_path)
+    _start_processing(video_service, video_id, source_path)
     return VideoJobResponse(video_id=video_id, status="queued")
 
 
 @router.post("/youtube", response_model=VideoJobResponse, status_code=status.HTTP_202_ACCEPTED)
-async def process_youtube(request: YouTubeRequest, user: AuthenticatedUser = Depends(get_current_user)) -> VideoJobResponse:
+async def process_youtube(
+    request: YouTubeRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    video_service: VideoProcessingService = Depends(get_video_processing_service),
+) -> VideoJobResponse:
     video_id = video_service.create_job()
     _register_video_owner(video_id, user.username)
-    _start_processing(video_id, Path(), str(request.url))
+    _start_processing(video_service, video_id, Path(), str(request.url))
     return VideoJobResponse(video_id=video_id, status="queued")
 
 
 @router.get("/{video_id}", response_model=VideoJobResponse)
-async def get_video(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> VideoJobResponse:
+async def get_video(video_id: str, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service)) -> VideoJobResponse:
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
@@ -104,7 +118,7 @@ async def get_video(video_id: str, user: AuthenticatedUser = Depends(get_current
 
 
 @router.get("/{video_id}/status", response_model=VideoStatusResponse)
-async def get_video_status(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> VideoStatusResponse:
+async def get_video_status(video_id: str, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service)) -> VideoStatusResponse:
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
@@ -113,7 +127,7 @@ async def get_video_status(video_id: str, user: AuthenticatedUser = Depends(get_
 
 
 @router.get("/{video_id}/events")
-async def video_events(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> StreamingResponse:
+async def video_events(video_id: str, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service)) -> StreamingResponse:
     _require_video_owner(video_id, user)
     if video_service.get_job(video_id) is None:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -135,7 +149,7 @@ async def video_events(video_id: str, user: AuthenticatedUser = Depends(get_curr
 
 
 @router.get("/{video_id}/transcript", response_model=TranscriptResponse)
-async def get_transcript(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> TranscriptResponse:
+async def get_transcript(video_id: str, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service)) -> TranscriptResponse:
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
@@ -149,7 +163,7 @@ async def get_transcript(video_id: str, user: AuthenticatedUser = Depends(get_cu
 
 
 @router.get("/{video_id}/summary", response_model=SummaryResponse)
-async def get_summary(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> SummaryResponse:
+async def get_summary(video_id: str, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service), ai_service: VideoAIService = Depends(get_ai_service)) -> SummaryResponse:
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
@@ -163,7 +177,7 @@ async def get_summary(video_id: str, user: AuthenticatedUser = Depends(get_curre
 
 
 @router.get("/{video_id}/summary/audio")
-async def get_summary_audio(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> FileResponse:
+async def get_summary_audio(video_id: str, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service), ai_service: VideoAIService = Depends(get_ai_service)) -> FileResponse:
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
@@ -179,20 +193,20 @@ async def get_summary_audio(video_id: str, user: AuthenticatedUser = Depends(get
 
 
 @router.get("/{video_id}/media")
-async def get_video_media(video_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> FileResponse:
+async def get_video_media(video_id: str, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service), blob_store: BlobStore = Depends(get_blob_store)) -> FileResponse:
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Video not found")
     if job.status != "completed":
         raise HTTPException(status_code=409, detail="Video is not ready")
-    source_path = _resolve_source_media_path(video_id)
+    source_path = _resolve_source_media_path(video_id, blob_store)
     media_type = mimetypes.guess_type(source_path.name)[0] or "application/octet-stream"
     return FileResponse(source_path, media_type=media_type, filename=source_path.name)
 
 
 @router.post("/{video_id}/question", response_model=QuestionResponse)
-async def ask_question(video_id: str, request: QuestionRequest, user: AuthenticatedUser = Depends(get_current_user)) -> QuestionResponse:
+async def ask_question(video_id: str, request: QuestionRequest, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service), ai_service: VideoAIService = Depends(get_ai_service)) -> QuestionResponse:
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
@@ -209,7 +223,7 @@ async def ask_question(video_id: str, request: QuestionRequest, user: Authentica
 
 
 @router.post("/{video_id}/voice-question", response_model=VoiceQuestionResponse)
-async def ask_voice_question(video_id: str, file: UploadFile = File(...), user: AuthenticatedUser = Depends(get_current_user)) -> VoiceQuestionResponse:
+async def ask_voice_question(video_id: str, file: UploadFile = File(...), user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service), voice_service: VoiceQuestionService = Depends(get_voice_service)) -> VoiceQuestionResponse:
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None:
@@ -233,12 +247,12 @@ async def ask_voice_question(video_id: str, file: UploadFile = File(...), user: 
 
 
 @router.get("/{video_id}/answers/{answer_id}/audio")
-async def get_voice_answer_audio(video_id: str, answer_id: str, user: AuthenticatedUser = Depends(get_current_user)) -> FileResponse:
+async def get_voice_answer_audio(video_id: str, answer_id: str, user: AuthenticatedUser = Depends(get_current_user), video_service: VideoProcessingService = Depends(get_video_processing_service), blob_store: BlobStore = Depends(get_blob_store)) -> FileResponse:
     _require_video_owner(video_id, user)
     job = video_service.get_job(video_id)
     if job is None or job.status != "completed" or not _ARTIFACT_ID.fullmatch(video_id) or not _ARTIFACT_ID.fullmatch(answer_id):
         raise HTTPException(status_code=404, detail="Answer audio not found")
-    audio_path = voice_service.audio_dir / video_id / f"{answer_id}.wav"
+    audio_path = blob_store.open(f"audio/answers/{video_id}/{answer_id}.wav")
     if not audio_path.exists():
         raise HTTPException(status_code=404, detail="Answer audio not found")
     return FileResponse(audio_path, media_type="audio/wav", filename=f"{answer_id}.wav")

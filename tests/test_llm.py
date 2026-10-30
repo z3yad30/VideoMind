@@ -1,22 +1,15 @@
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from tests.fakes import FakeBlobStore, FakeLLMClient, FakeTTS
 from backend.app.services.llm import GroqLLMService, VideoAIService
 
 
-class FakeCompletions:
+class FakeCompletions(FakeLLMClient):
     def __init__(self, responses: list[str]) -> None:
-        self.responses = responses
-        self.prompts: list[str] = []
-
-    def create(self, *, messages, model, temperature):
-        self.prompts.append(messages[0]["content"])
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=self.responses.pop(0)))]
-        )
+        super().__init__(responses)
 
 
 class FakeRAG:
@@ -35,7 +28,7 @@ class FakeRAG:
 
 def test_groq_default_model_and_grounded_question_prompt() -> None:
     client = FakeCompletions(["The answer cannot be determined from the video context."])
-    service = GroqLLMService(api_key="test-key", client=client)
+    service = GroqLLMService(client)
 
     assert service.answer("What happened?", []) == "The answer cannot be determined from the video context."
     assert service.model == "openai/gpt-oss-120b"
@@ -46,7 +39,7 @@ def test_groq_default_model_and_grounded_question_prompt() -> None:
 def test_hierarchical_summary_uses_required_structure() -> None:
     summary = {field: field for field in ("Overview", "Main Topics", "Key Concepts", "Important Details", "Key Takeaways")}
     client = FakeCompletions([json.dumps(summary), json.dumps(summary), json.dumps(summary)])
-    service = GroqLLMService(api_key="test-key", client=client)
+    service = GroqLLMService(client)
 
     result = service.summarize_hierarchically(["first transcript", "second transcript"], max_prompt_characters=10)
 
@@ -59,7 +52,9 @@ def test_question_sources_are_only_retrieved_chunks(tmp_path: Path) -> None:
     rag = FakeRAG([
         {"text": "A real transcript fact", "metadata": {"start": 120.5, "end": 145.8}},
     ])
-    service = VideoAIService(llm=GroqLLMService(api_key="test-key", client=client), rag=rag, summary_dir=tmp_path)
+    service = VideoAIService(
+        llm=GroqLLMService(client), rag=rag, blob_store=FakeBlobStore(tmp_path / "data"), tts=FakeTTS()
+    )
 
     result = service.answer_question("video-1", "What is the fact?")
 
@@ -72,7 +67,9 @@ def test_question_sources_are_only_retrieved_chunks(tmp_path: Path) -> None:
 def test_raw_transcript_fallback_calls_the_llm_with_transcript_context(tmp_path: Path) -> None:
     client = FakeCompletions(["The raw transcript explains the topic."])
     rag = FakeRAG([], "[1.0-2.0] A raw transcript fact")
-    service = VideoAIService(llm=GroqLLMService(api_key="test-key", client=client), rag=rag, summary_dir=tmp_path)
+    service = VideoAIService(
+        llm=GroqLLMService(client), rag=rag, blob_store=FakeBlobStore(tmp_path / "data"), tts=FakeTTS()
+    )
 
     result = service.answer_question("video-1", "What is not in the transcript?")
 
@@ -85,7 +82,9 @@ def test_raw_transcript_fallback_calls_the_llm_with_transcript_context(tmp_path:
 
 def test_conversation_history_is_bounded_and_isolated_by_video(tmp_path: Path) -> None:
     client = FakeCompletions(["answer 1", "answer 2", "answer 3", "answer 4", "answer 5"])
-    service = VideoAIService(llm=GroqLLMService(api_key="test-key", client=client), rag=FakeRAG([]), summary_dir=tmp_path)
+    service = VideoAIService(
+        llm=GroqLLMService(client), rag=FakeRAG([]), blob_store=FakeBlobStore(tmp_path / "data"), tts=FakeTTS()
+    )
 
     service.answer_question("video-a", "Question 1")
     service.answer_question("video-a", "Question 2")
@@ -107,7 +106,9 @@ def test_conversation_history_is_bounded_and_isolated_by_video(tmp_path: Path) -
 
 def test_persistent_chat_history_is_bounded_without_using_video_global_history(tmp_path: Path) -> None:
     client = FakeCompletions(["chat answer"])
-    service = VideoAIService(llm=GroqLLMService(api_key="test-key", client=client), rag=FakeRAG([]), summary_dir=tmp_path)
+    service = VideoAIService(
+        llm=GroqLLMService(client), rag=FakeRAG([]), blob_store=FakeBlobStore(tmp_path / "data"), tts=FakeTTS()
+    )
     history = [{"role": "user", "content": f"Chat message {index}"} for index in range(8)]
 
     service.answer_question("video-a", "Current question", history=history)
@@ -121,10 +122,10 @@ def test_persistent_chat_history_is_bounded_without_using_video_global_history(t
 
 def test_llm_failures_are_normalized() -> None:
     class BrokenCompletions:
-        def create(self, **kwargs):
+        def complete(self, messages, **kwargs):
             raise TimeoutError("request timed out")
 
-    service = GroqLLMService(api_key="test-key", client=BrokenCompletions())
+    service = GroqLLMService(BrokenCompletions())
 
     with pytest.raises(RuntimeError, match="LLM request failed"):
         service.complete("question")

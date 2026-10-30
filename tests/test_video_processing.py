@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 
 from backend.app.main import app
 from backend.app.api.dependencies import get_current_user
+from backend.app.container import get_ai_service, get_blob_store, get_media_service, get_video_processing_service
 from backend.app.services.auth import AuthenticatedUser
 from backend.app.services.asr import ASRSegment
 from backend.app.services.media import MediaService
@@ -17,6 +18,7 @@ from backend.app.schemas.videos import YouTubeRequest
 import backend.app.api.videos as videos_api
 import backend.app.services.media as media_module
 from backend.app.services.video_storage import VideoOwnershipStore
+from tests.fakes import FakeBlobStore, FakeTranscriber
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +28,18 @@ def authenticated_video_user(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser("alice")
     yield owners
     app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.fixture(autouse=True)
+def route_service_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        get_video_processing_service,
+        lambda: SimpleNamespace(get_job=lambda _: None),
+    )
+    monkeypatch.setitem(app.dependency_overrides, get_ai_service, lambda: SimpleNamespace())
+    monkeypatch.setitem(app.dependency_overrides, get_media_service, MediaService)
+    monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: FakeBlobStore(tmp_path / "data"))
 
 
 class FakeMedia:
@@ -40,11 +54,16 @@ class FakeASR:
         return [ASRSegment(" first sentence ", 0.25, 1.75), ASRSegment("second sentence", 2.0, 3.5)]
 
 
-def test_processing_preserves_timestamps_and_keeps_source() -> None:
-    source = Path("data/videos/test-phase2-source.wav")
+def test_processing_preserves_timestamps_and_keeps_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.wav"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"source")
-    service = VideoProcessingService(media=FakeMedia(), asr=FakeASR())
+    service = VideoProcessingService(
+        FakeMedia(),
+        FakeTranscriber([ASRSegment(" first sentence ", 0.25, 1.75), ASRSegment("second sentence", 2.0, 3.5)]),
+        None,
+        FakeBlobStore(tmp_path / "data"),
+    )
     video_id = service.create_job()
 
     try:
@@ -56,14 +75,14 @@ def test_processing_preserves_timestamps_and_keeps_source() -> None:
         ]
         assert source.exists()
     finally:
-        (Path("data/transcripts") / f"{video_id}.json").unlink(missing_ok=True)
+        (tmp_path / "data" / "transcripts" / f"{video_id}.json").unlink(missing_ok=True)
 
 
-def test_processing_emits_stage_events() -> None:
-    source = Path("data/videos/test-stage-events.wav")
+def test_processing_emits_stage_events(tmp_path: Path) -> None:
+    source = tmp_path / "source.wav"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"source")
-    service = VideoProcessingService(media=FakeMedia(), asr=FakeASR())
+    service = VideoProcessingService(FakeMedia(), FakeTranscriber(), None, FakeBlobStore(tmp_path / "data"))
     video_id = service.create_job()
 
     try:
@@ -73,14 +92,14 @@ def test_processing_emits_stage_events() -> None:
         assert any(event["event"] == "stage_completed" and event["stage"] == "transcribing" for event in events)
         assert events[-1]["event"] == "processing_completed"
     finally:
-        (Path("data/transcripts") / f"{video_id}.json").unlink(missing_ok=True)
+        (tmp_path / "data" / "transcripts" / f"{video_id}.json").unlink(missing_ok=True)
 
 
-def test_processing_records_failure_and_keeps_source() -> None:
-    source = Path("data/videos/test-phase2-failure.wav")
+def test_processing_records_failure_and_keeps_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.wav"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"source")
-    service = VideoProcessingService(media=FakeMedia(), asr=lambda: None)  # type: ignore[arg-type]
+    service = VideoProcessingService(FakeMedia(), lambda: None, None, FakeBlobStore(tmp_path / "data"))  # type: ignore[arg-type]
     video_id = service.create_job()
 
     try:
@@ -90,7 +109,25 @@ def test_processing_records_failure_and_keeps_source() -> None:
         assert job.error
         assert source.exists()
     finally:
-        (Path("data/transcripts") / f"{video_id}.json").unlink(missing_ok=True)
+        (tmp_path / "data" / "transcripts" / f"{video_id}.json").unlink(missing_ok=True)
+
+
+def test_youtube_processing_persists_source_in_existing_video_layout(tmp_path: Path) -> None:
+    class YoutubeMedia(FakeMedia):
+        def download_youtube(self, source_url: str, output_dir: Path, video_id: str) -> Path:
+            assert source_url == "https://youtube.com/watch?v=example"
+            source = output_dir / f"{video_id}.mp4"
+            source.write_bytes(b"downloaded video")
+            return source
+
+    blob_store = FakeBlobStore(tmp_path / "data")
+    service = VideoProcessingService(YoutubeMedia(), FakeTranscriber(), None, blob_store)
+    video_id = service.create_job()
+
+    service.process(video_id, Path(), "https://youtube.com/watch?v=example")
+
+    assert service.get_job(video_id).status == "completed"
+    assert blob_store.open(f"videos/{video_id}.mp4").read_bytes() == b"downloaded video"
 
 
 @pytest.mark.asyncio
@@ -102,7 +139,7 @@ async def test_upload_rejects_unsupported_media() -> None:
 
 @pytest.mark.asyncio
 async def test_get_video_returns_404_for_unknown_video(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda video_id: None))
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: SimpleNamespace(get_job=lambda video_id: None))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/videos/unknown-video")
@@ -115,10 +152,10 @@ async def test_get_video_returns_404_for_unknown_video(monkeypatch: pytest.Monke
 async def test_get_video_returns_job_for_known_video(monkeypatch: pytest.MonkeyPatch, authenticated_video_user: VideoOwnershipStore) -> None:
     video_id = "a" * 32
     authenticated_video_user.register(video_id, "alice")
-    monkeypatch.setattr(
-        videos_api,
-        "video_service",
-        SimpleNamespace(get_job=lambda requested_id: SimpleNamespace(video_id=requested_id, status="transcribing")),
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        get_video_processing_service,
+        lambda: SimpleNamespace(get_job=lambda requested_id: SimpleNamespace(video_id=requested_id, status="transcribing")),
     )
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -139,8 +176,8 @@ async def test_question_is_rejected_until_processing_completes(monkeypatch: pyte
         def answer_question(self, video_id: str, question: str):
             raise AssertionError("LLM must not be called before processing completes")
 
-    monkeypatch.setattr(videos_api, "video_service", type("Service", (), {"get_job": lambda self, _: Job()})())
-    monkeypatch.setattr(videos_api, "ai_service", AI())
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: type("Service", (), {"get_job": lambda self, _: Job()})())
+    monkeypatch.setitem(app.dependency_overrides, get_ai_service, AI)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(f"/videos/{video_id}/question", json={"question": "What happened?"})
@@ -157,12 +194,8 @@ async def test_standalone_video_question_still_works(monkeypatch: pytest.MonkeyP
             assert (video_id, question) == ("c" * 32, "What happened?")
             return {"answer": "A standalone answer", "sources": []}
 
-    monkeypatch.setattr(
-        videos_api,
-        "video_service",
-        SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")),
-    )
-    monkeypatch.setattr(videos_api, "ai_service", AI())
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")))
+    monkeypatch.setitem(app.dependency_overrides, get_ai_service, AI)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(f"/videos/{video_id}/question", json={"question": "What happened?"})
@@ -204,11 +237,7 @@ def test_corrupt_media_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 async def test_invalid_youtube_url_and_malformed_question_are_rejected(monkeypatch: pytest.MonkeyPatch, authenticated_video_user: VideoOwnershipStore) -> None:
     video_id = "d" * 32
     authenticated_video_user.register(video_id, "alice")
-    monkeypatch.setattr(
-        videos_api,
-        "video_service",
-        SimpleNamespace(get_job=lambda requested_id: SimpleNamespace(status="completed")),
-    )
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: SimpleNamespace(get_job=lambda requested_id: SimpleNamespace(status="completed")))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         invalid_url = await client.post("/videos/youtube", json={"url": "not-a-url"})
         malformed_question = await client.post(f"/videos/{video_id}/question", json={"question": 12})
@@ -241,7 +270,7 @@ def test_concurrent_jobs_keep_independent_state(tmp_path: Path) -> None:
     class ConcurrentMedia(FakeMedia):
         pass
 
-    service = VideoProcessingService(media=ConcurrentMedia(), asr=FakeASR())
+    service = VideoProcessingService(ConcurrentMedia(), FakeTranscriber(), None, FakeBlobStore(tmp_path / "data"))
     sources = [tmp_path / f"source-{index}.wav" for index in range(2)]
     video_ids = [service.create_job() for _ in sources]
     for source in sources:
@@ -320,10 +349,10 @@ async def test_video_upload_and_youtube_jobs_are_persistently_owned(
             destination.write_bytes(file.file.read())
             return destination
 
-    monkeypatch.setattr(videos_api, "settings", SimpleNamespace(project_root=tmp_path))
-    monkeypatch.setattr(videos_api, "video_service", jobs)
-    monkeypatch.setattr(videos_api, "media_service", UploadMedia())
-    monkeypatch.setattr(videos_api, "_start_processing", lambda video_id, _path, source_url=None: started.append((video_id, source_url)))
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: jobs)
+    monkeypatch.setitem(app.dependency_overrides, get_media_service, UploadMedia)
+    monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: FakeBlobStore(tmp_path / "data"))
+    monkeypatch.setattr(videos_api, "_start_processing", lambda _service, video_id, _path, source_url=None: started.append((video_id, source_url)))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         uploaded = await client.post("/videos/upload", files={"file": ("source.mp4", b"video", "video/mp4")})
@@ -346,8 +375,8 @@ async def test_video_routes_reject_anonymous_and_foreign_users(
     media_path = tmp_path / "data" / "videos" / f"{video_id}.mp4"
     media_path.parent.mkdir(parents=True, exist_ok=True)
     media_path.write_bytes(b"private video")
-    monkeypatch.setattr(videos_api, "settings", SimpleNamespace(project_root=tmp_path))
-    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda _: SimpleNamespace(status="completed")))
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: SimpleNamespace(get_job=lambda _: SimpleNamespace(status="completed")))
+    monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: FakeBlobStore(tmp_path / "data"))
 
     app.dependency_overrides.pop(get_current_user)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as anonymous:
@@ -370,8 +399,8 @@ async def test_media_endpoint_requires_completed_processing(monkeypatch: pytest.
     media_path = tmp_path / "data" / "videos" / f"{media_id}.mp4"
     media_path.parent.mkdir(parents=True, exist_ok=True)
     media_path.write_bytes(b"video")
-    monkeypatch.setattr(videos_api, "settings", SimpleNamespace(project_root=tmp_path))
-    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="transcribing")))
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="transcribing")))
+    monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: FakeBlobStore(tmp_path / "data"))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(f"/videos/{media_id}/media")
@@ -387,8 +416,8 @@ async def test_media_endpoint_serves_persisted_video(monkeypatch: pytest.MonkeyP
     media_path = tmp_path / "data" / "videos" / f"{media_id}.mp4"
     media_path.parent.mkdir(parents=True, exist_ok=True)
     media_path.write_bytes(b"video")
-    monkeypatch.setattr(videos_api, "settings", SimpleNamespace(project_root=tmp_path))
-    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")))
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")))
+    monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: FakeBlobStore(tmp_path / "data"))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(f"/videos/{media_id}/media")
@@ -400,8 +429,8 @@ async def test_media_endpoint_serves_persisted_video(monkeypatch: pytest.MonkeyP
 
 @pytest.mark.asyncio
 async def test_media_endpoint_rejects_unknown_or_unsafe_ids(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(videos_api, "settings", SimpleNamespace(project_root=tmp_path))
-    monkeypatch.setattr(videos_api, "video_service", SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")))
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")))
+    monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: FakeBlobStore(tmp_path / "data"))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         missing = await client.get("/videos/" + "c" * 32 + "/media")
@@ -413,10 +442,10 @@ async def test_media_endpoint_rejects_unknown_or_unsafe_ids(monkeypatch: pytest.
 
 @pytest.mark.asyncio
 async def test_audio_artifact_rejects_unsafe_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        videos_api,
-        "video_service",
-        SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")),
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        get_video_processing_service,
+        lambda: SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/videos/../../answers/../../audio")

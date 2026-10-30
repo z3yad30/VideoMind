@@ -22,7 +22,7 @@ The pipeline is:
 
 The important behavior change is that YouTube downloads are no longer temporary: the saved source remains in `data/videos/` after processing completes and is served through the backend media route for playback.
 
-The backend uses FastAPI and Uvicorn. Route handlers remain thin; authentication, user and video-owner storage, chat storage, processing, ASR, media, embedding, vector-store, LLM, and TTS responsibilities live in separate modules.
+The backend uses FastAPI and Uvicorn. External service boundaries are defined as protocols in `backend/app/ports/`, with local implementations in `backend/app/adapters/`. `backend/app/container.py` composes those adapters and the injected services; API routes obtain services through FastAPI dependencies. The local blob adapter retains the existing `data/` directory layout.
 
 ## Technologies
 

@@ -10,10 +10,12 @@ import backend.app.api.auth as auth_api
 import backend.app.api.chats as chats_api
 import backend.app.api.dependencies as auth_dependencies
 from backend.app.main import app
+from backend.app.container import get_ai_service, get_blob_store, get_video_processing_service, get_voice_service
 from backend.app.services.auth import AuthenticationService
 from backend.app.services.chat_storage import ChatStore
 from backend.app.services.user_storage import UserStore
 from backend.app.services.video_storage import VideoOwnershipStore
+from tests.fakes import FakeBlobStore
 
 
 @pytest.fixture
@@ -25,6 +27,14 @@ def isolated_services(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ChatSt
     monkeypatch.setattr(auth_dependencies, "auth_service", auth_service)
     monkeypatch.setattr(chats_api, "chat_store", chat_service)
     monkeypatch.setattr(chats_api, "video_ownership", video_service)
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        get_video_processing_service,
+        lambda: type("Videos", (), {"get_job": lambda self, _: None})(),
+    )
+    monkeypatch.setitem(app.dependency_overrides, get_ai_service, lambda: object())
+    monkeypatch.setitem(app.dependency_overrides, get_voice_service, lambda: object())
+    monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: FakeBlobStore(tmp_path / "data"))
     return chat_service
 
 
@@ -96,7 +106,7 @@ async def test_chat_question_persists_both_messages_sources_audio_and_reload(
             return {"answer": "A grounded answer", "sources": [{"start": 4.0, "end": 8.0, "text": "Evidence"}]}
 
     ai = AI()
-    monkeypatch.setattr(chats_api, "ai_service", ai)
+    monkeypatch.setitem(app.dependency_overrides, get_ai_service, lambda: ai)
     class Videos:
         def get_job(self, video_id):
             return type("Job", (), {"status": "completed"})()
@@ -105,8 +115,8 @@ async def test_chat_question_persists_both_messages_sources_audio_and_reload(
         def synthesize_answer(self, video_id, answer):
             return "a" * 32, Path("answer.wav")
 
-    monkeypatch.setattr(chats_api, "video_service", Videos())
-    monkeypatch.setattr(chats_api, "voice_service", Voice())
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, Videos)
+    monkeypatch.setitem(app.dependency_overrides, get_voice_service, Voice)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await register_and_login(client, "alice")
@@ -156,7 +166,7 @@ async def test_chat_answer_audio_generation_is_idempotent_persisted_and_owner_sc
 
     class Voice:
         def __init__(self) -> None:
-            self.audio_dir = tmp_path / "answers"
+            self.audio_dir = tmp_path / "data" / "audio" / "answers"
             self.calls = 0
 
         def synthesize_answer(self, video_id, answer):
@@ -167,8 +177,9 @@ async def test_chat_answer_audio_generation_is_idempotent_persisted_and_owner_sc
             return answer_id, audio_path
 
     voice = Voice()
-    monkeypatch.setattr(chats_api, "video_service", Videos())
-    monkeypatch.setattr(chats_api, "voice_service", voice)
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, Videos)
+    monkeypatch.setitem(app.dependency_overrides, get_voice_service, lambda: voice)
+    monkeypatch.setitem(app.dependency_overrides, get_blob_store, lambda: FakeBlobStore(tmp_path / "data"))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as alice, AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
@@ -204,7 +215,7 @@ async def test_chat_answer_audio_generation_is_idempotent_persisted_and_owner_sc
 
 @pytest.mark.asyncio
 async def test_chat_question_requires_an_available_video(isolated_services: ChatStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(chats_api, "video_service", type("Videos", (), {"get_job": lambda self, _: None})())
+    monkeypatch.setitem(app.dependency_overrides, get_video_processing_service, lambda: type("Videos", (), {"get_job": lambda self, _: None})())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await register_and_login(client, "alice")
         no_video = await client.post("/chats", json={})

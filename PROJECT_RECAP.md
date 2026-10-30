@@ -27,20 +27,23 @@ flowchart LR
 | Path | Responsibility |
 |---|---|
 | `backend/app/main.py` | Creates the FastAPI app and registers auth, chat, health, and video routers. |
+| `backend/app/ports/`, `backend/app/adapters/`, `backend/app/container.py` | Define external dependency protocols, local concrete adapters, and the single application composition root. |
 | `backend/app/api/auth.py`, `dependencies.py` | Registration, login, `/auth/me`, logout, and current-session dependency. |
 | `backend/app/api/chats.py` | Authenticated chat CRUD, Q&A, answer-audio generation/playback. |
 | `backend/app/api/videos.py` | Authenticated upload, YouTube, status/SSE, media, transcript, summary, question, and audio routes. |
 | `backend/app/services/auth.py`, `user_storage.py` | Argon2 password handling, in-memory sessions, atomic JSON user storage. |
 | `backend/app/services/chat_storage.py` | Atomic per-user chat JSON persistence and canonical video-context hydration. |
 | `backend/app/services/video_storage.py` | Atomic video-ID-to-owner index under `data/videos/.owners.json`. |
-| `backend/app/services/video_processing.py`, `media.py`, `asr.py` | Process-local jobs, saved source media, temporary extraction, timestamped ASR. |
-| `backend/app/services/rag.py` | Timestamp-preserving chunks, per-video Chroma collections, similarity filtering, transcript fallback selection. |
-| `backend/app/services/llm.py`, `voice.py`, `tts.py` | Groq prompts, grounded Q&A and summaries, voice-question flow, WAV synthesis. |
+| `backend/app/services/video_processing.py`, `media.py` | Process-local jobs, saved source media, temporary extraction, and timestamped transcription orchestration. |
+| `backend/app/services/rag.py` | Timestamp-preserving chunks, injected vector and embedding ports, similarity filtering, transcript fallback selection. |
+| `backend/app/services/llm.py`, `voice.py` | Injected LLM/TTS ports, grounded Q&A and summaries, and voice-question flow. |
 | `frontend/src/App.tsx` | Theme persistence, login/register, session restoration, logout and expiry handling. |
 | `frontend/src/VideoChatWorkspace.tsx` | Chat/video selection, ingestion, SSE/status refresh, chat questions and view state. |
 | `frontend/src/WorkspaceComponents.tsx` | Sidebar, full chat history, composer, collapsed sources, audio controls, video/context panels. |
 | `frontend/src/api.ts`, `styles.css` | Typed cookie-backed requests and shared responsive/theme styling. |
 | `scripts/vanish.py` | Standalone deletion of the explicit runtime-data allowlist. |
+
+Business services depend on ports rather than concrete adapters. FastAPI dependencies read the composed services from `backend/app/container.py`; the local blob adapter continues to store runtime artifacts under the same `data/` paths.
 
 ## Authentication and Data Ownership
 

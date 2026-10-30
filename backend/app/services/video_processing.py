@@ -2,13 +2,12 @@ import json
 import logging
 import threading
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from backend.app.core.config import settings
-from backend.app.services.asr import ASRService, FasterWhisperASRService
+from backend.app.ports import BlobStore, Segment, Transcriber
 from backend.app.services.media import MediaProcessingError, MediaService, temporary_directory
 from backend.app.services.llm import VideoAIService
 
@@ -40,11 +39,17 @@ STAGES = [
 
 
 class VideoProcessingService:
-    def __init__(self, media: MediaService | None = None, asr: ASRService | None = None, ai: VideoAIService | None = None) -> None:
-        self.media = media or MediaService()
-        self.asr = asr
+    def __init__(
+        self,
+        media: MediaService,
+        transcriber: Transcriber,
+        ai: VideoAIService | None,
+        blob_store: BlobStore,
+    ) -> None:
+        self.media = media
+        self.transcriber = transcriber
         self.ai = ai
-        self._asr_lock = threading.Lock()
+        self.blob_store = blob_store
         self._jobs: dict[str, VideoJob] = {}
         self._events: dict[str, list[dict[str, object]]] = {}
         self._lock = threading.Lock()
@@ -74,7 +79,11 @@ class VideoProcessingService:
                 self._stage(video_id, "validating", "completed", "Media source accepted")
                 if source_url:
                     self._stage(video_id, "downloading", "running", "Downloading YouTube video")
-                    media_path = self.media.download_youtube(source_url, settings.project_root / "data" / "videos", video_id)
+                    downloaded_path = self.media.download_youtube(source_url, Path(temp_dir), video_id)
+                    media_path = self.blob_store.put(
+                        f"videos/{video_id}{downloaded_path.suffix}",
+                        downloaded_path,
+                    )
                     self._stage(video_id, "downloading", "completed", "Video downloaded")
                 else:
                     self._stage(video_id, "downloading", "skipped", "Not needed for an uploaded file")
@@ -83,8 +92,7 @@ class VideoProcessingService:
                 self._stage(video_id, "extracting_audio", "completed", "Audio extracted")
                 self._stage(video_id, "detecting_language", "skipped", "Language detection is provided by transcription")
                 self._stage(video_id, "transcribing", "running", "Transcribing audio", detail="Processing audio segments")
-                asr = self._get_asr()
-                segments = asr.transcribe(audio_path)
+                segments = self.transcriber.transcribe(audio_path)
                 if not segments:
                     raise MediaProcessingError("Transcription produced no speech segments")
                 self._stage(video_id, "transcribing", "completed", "Transcription completed", detail=f"{len(segments)} segments transcribed")
@@ -93,8 +101,7 @@ class VideoProcessingService:
                 self._stage(video_id, "building_transcript", "completed", "Transcript ready", detail=f"{len(segments)} segments")
                 if self.ai is not None:
                     self._stage(video_id, "chunking", "running", "Building transcript chunks")
-                    rag = self.ai._rag()
-                    chunks = rag.index_transcript(video_id, on_progress=self._rag_progress(video_id))
+                    chunks = self.ai.index_transcript(video_id, on_progress=self._rag_progress(video_id))
                     self._stage(video_id, "chunking", "completed", "Transcript chunks built", detail=f"{len(chunks)} chunks")
                     self._stage(video_id, "embedding", "completed", "Embeddings generated", detail=f"{len(chunks)} chunks")
                     self._stage(video_id, "indexing", "completed", "Knowledge indexed", detail="Video-specific knowledge base")
@@ -117,31 +124,26 @@ class VideoProcessingService:
             self._stage(video_id, str(failed_stage), "failed", "Processing failed", str(exc))
             self._set_job(video_id, "failed", str(exc))
 
-    def _get_asr(self) -> ASRService:
-        if self.asr is not None:
-            return self.asr
-        with self._asr_lock:
-            if self.asr is None:
-                logger.info("Loading ASR model '%s' on %s", settings.asr_model, settings.asr_device)
-                self.asr = FasterWhisperASRService()
-                logger.info("ASR model '%s' loaded", settings.asr_model)
-            return self.asr
-
     def get_transcript(self, video_id: str) -> list[dict[str, object]] | None:
-        path = settings.project_root / "data" / "transcripts" / f"{video_id}.json"
-        if not path.exists():
+        key = f"transcripts/{video_id}.json"
+        if not self.blob_store.exists(key):
             return None
-        return json.loads(path.read_text(encoding="utf-8"))["segments"]
+        return json.loads(self.blob_store.open(key).read_text(encoding="utf-8"))["segments"]
 
-    def _write_transcript(self, video_id: str, segments) -> None:
-        path = settings.project_root / "data" / "transcripts" / f"{video_id}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = path.with_suffix(".json.tmp")
-        temporary_path.write_text(
-            json.dumps({"video_id": video_id, "segments": [asdict(segment) for segment in segments]}, indent=2),
-            encoding="utf-8",
+    def _write_transcript(self, video_id: str, segments: list[Segment]) -> None:
+        self.blob_store.put(
+            f"transcripts/{video_id}.json",
+            json.dumps(
+                {
+                    "video_id": video_id,
+                    "segments": [
+                        {"text": segment.text, "start": segment.start, "end": segment.end}
+                        for segment in segments
+                    ],
+                },
+                indent=2,
+            ),
         )
-        temporary_path.replace(path)
 
     def _set_job(self, video_id: str, status: str, error: str | None = None) -> None:
         with self._lock:

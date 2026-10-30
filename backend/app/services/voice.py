@@ -1,35 +1,33 @@
 import uuid
 from pathlib import Path
 
-from backend.app.core.config import settings
-from backend.app.services.asr import ASRService, FasterWhisperASRService
+from backend.app.ports import BlobStore, TTS, Transcriber
 from backend.app.services.llm import VideoAIService
 from backend.app.services.media import MediaService, temporary_directory
-from backend.app.services.tts import Pyttsx3TTSService, TTSService
 
 
 class VoiceQuestionService:
     def __init__(
         self,
         ai: VideoAIService,
-        media: MediaService | None = None,
-        asr: ASRService | None = None,
-        tts: TTSService | None = None,
-        audio_dir: Path | None = None,
+        media: MediaService,
+        transcriber: Transcriber,
+        tts: TTS,
+        blob_store: BlobStore,
     ) -> None:
         self.ai = ai
-        self.media = media or MediaService()
-        self.asr = asr
+        self.media = media
+        self.transcriber = transcriber
         self.tts = tts
-        self.audio_dir = audio_dir or settings.project_root / "data" / "audio" / "answers"
+        self.blob_store = blob_store
+        self.audio_dir = blob_store.open("audio/answers")
 
     def answer(self, video_id: str, upload) -> dict[str, object]:
         suffix = self.media.validate_filename(upload.filename)
         with temporary_directory() as temp_dir:
             question_path = Path(temp_dir) / f"question{suffix}"
             self.media.save_upload(upload, question_path)
-            asr = self.asr or FasterWhisperASRService()
-            segments = asr.transcribe(question_path)
+            segments = self.transcriber.transcribe(question_path)
 
         question = " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
         if not question:
@@ -47,9 +45,9 @@ class VoiceQuestionService:
 
     def synthesize_answer(self, video_id: str, answer: str) -> tuple[str, Path]:
         answer_id = uuid.uuid4().hex
-        audio_path = self.audio_dir / video_id / f"{answer_id}.wav"
+        audio_path = self.blob_store.open(f"audio/answers/{video_id}/{answer_id}.wav")
         try:
-            (self.tts or Pyttsx3TTSService()).synthesize(answer, audio_path)
+            self.tts.synthesize(answer, audio_path)
         except RuntimeError:
             raise
         except Exception as exc:

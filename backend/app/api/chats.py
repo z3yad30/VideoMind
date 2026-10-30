@@ -7,7 +7,13 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from backend.app.api.dependencies import get_current_user
-from backend.app.api.videos import ai_service, video_service, voice_service
+from backend.app.container import (
+    get_ai_service,
+    get_blob_store,
+    get_video_processing_service,
+    get_voice_service,
+)
+from backend.app.ports import BlobStore
 from backend.app.schemas.chats import (
     ChatCreate,
     ChatListItem,
@@ -19,6 +25,7 @@ from backend.app.schemas.chats import (
 )
 from backend.app.schemas.videos import QuestionRequest
 from backend.app.services.auth import AuthenticatedUser
+from backend.app.services.llm import VideoAIService
 from backend.app.services.chat_storage import (
     ChatNotFoundError,
     ChatStoreError,
@@ -26,6 +33,8 @@ from backend.app.services.chat_storage import (
     chat_store,
 )
 from backend.app.services.video_storage import VideoOwnershipError, video_ownership
+from backend.app.services.video_processing import VideoProcessingService
+from backend.app.services.voice import VoiceQuestionService
 
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -47,12 +56,15 @@ def _message_answer_id(chat_id: str, message_id: str, audio_ref: str | None) -> 
     return None
 
 
-def _answer_audio_path(video_id: str, answer_id: str) -> Path | None:
+def _answer_audio_path(video_id: str, answer_id: str, blob_store: BlobStore) -> Path | None:
     if not re.fullmatch(r"[0-9a-f]{32}", video_id) or not _ANSWER_AUDIO_ID.fullmatch(answer_id):
         return None
-    audio_root = voice_service.audio_dir
-    video_audio_dir = audio_root / video_id
-    audio_path = video_audio_dir / f"{answer_id}.wav"
+    try:
+        audio_root = blob_store.open("audio/answers")
+        video_audio_dir = audio_root / video_id
+        audio_path = blob_store.open(f"audio/answers/{video_id}/{answer_id}.wav")
+    except (OSError, ValueError):
+        return None
     if audio_root.is_symlink() or video_audio_dir.is_symlink() or audio_path.is_symlink():
         return None
     try:
@@ -114,6 +126,9 @@ async def ask_in_chat(
     chat_id: str,
     request: QuestionRequest,
     user: AuthenticatedUser = Depends(get_current_user),
+    video_service: VideoProcessingService = Depends(get_video_processing_service),
+    ai_service: VideoAIService = Depends(get_ai_service),
+    voice_service: VoiceQuestionService = Depends(get_voice_service),
 ) -> ChatQuestionResponse:
     try:
         chat = chat_store.get(user.username, chat_id)
@@ -184,6 +199,9 @@ async def generate_chat_answer_audio(
     chat_id: str,
     message_id: str,
     user: AuthenticatedUser = Depends(get_current_user),
+    video_service: VideoProcessingService = Depends(get_video_processing_service),
+    voice_service: VoiceQuestionService = Depends(get_voice_service),
+    blob_store: BlobStore = Depends(get_blob_store),
 ) -> dict[str, str]:
     chat, message = _owned_message(chat_id, message_id, user.username)
     lock_key = (user.username, chat_id, message_id)
@@ -192,7 +210,7 @@ async def generate_chat_answer_audio(
         chat, message = _owned_message(chat_id, message_id, user.username)
         answer_id = _message_answer_id(chat_id, message_id, message.answer_audio_ref)
         if answer_id:
-            audio_path = _answer_audio_path(str(chat.video_id), answer_id)
+            audio_path = _answer_audio_path(str(chat.video_id), answer_id, blob_store)
             if audio_path and audio_path.is_file():
                 return {"answer_audio_ref": message.answer_audio_ref or ""}
         if not chat.video_id or not re.fullmatch(r"[0-9a-f]{32}", chat.video_id):
@@ -208,7 +226,7 @@ async def generate_chat_answer_audio(
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        expected_path = _answer_audio_path(chat.video_id, answer_id)
+        expected_path = _answer_audio_path(chat.video_id, answer_id, blob_store)
         if expected_path is None or not audio_path.is_file() or audio_path.is_symlink():
             raise HTTPException(status_code=503, detail="TTS did not produce an audio file")
         try:
@@ -231,6 +249,8 @@ def get_chat_answer_audio(
     chat_id: str,
     message_id: str,
     user: AuthenticatedUser = Depends(get_current_user),
+    video_service: VideoProcessingService = Depends(get_video_processing_service),
+    blob_store: BlobStore = Depends(get_blob_store),
 ) -> FileResponse:
     chat, message = _owned_message(chat_id, message_id, user.username)
     answer_id = _message_answer_id(chat_id, message_id, message.answer_audio_ref)
@@ -239,7 +259,7 @@ def get_chat_answer_audio(
     job = video_service.get_job(chat.video_id)
     if job is None or job.status != "completed":
         raise HTTPException(status_code=404, detail="Answer audio not found")
-    audio_path = _answer_audio_path(chat.video_id, answer_id)
+    audio_path = _answer_audio_path(chat.video_id, answer_id, blob_store)
     if audio_path is None or not audio_path.is_file():
         raise HTTPException(status_code=404, detail="Answer audio not found")
     return FileResponse(audio_path, media_type="audio/wav", filename=f"{answer_id}.wav")

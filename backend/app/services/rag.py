@@ -1,23 +1,14 @@
-import hashlib
 import json
-import logging
 import re
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Callable
 
-from backend.app.core.config import settings
-
-logger = logging.getLogger(__name__)
+from backend.app.ports import BlobStore, Embedder, VectorStore
+from backend.app.utils.vector import normalize_distance_to_similarity
 
 MIN_SIMILARITY = 0.70
 RELATIVE_MARGIN = 0.10
 DEFAULT_TOP_K = 5
-
-
-class EmbeddingModel(Protocol):
-    def encode(self, sentences: list[str]) -> Any:
-        """Encode text into vectors."""
 
 
 @dataclass(frozen=True)
@@ -35,80 +26,6 @@ class TranscriptChunk:
             "end": self.end,
             "source": source,
         }
-
-
-class LocalFallbackEmbedding:
-    def __init__(self, dimensions: int = 32) -> None:
-        self.dimensions = dimensions
-
-    def _vector_for(self, text: str) -> list[float]:
-        if not text:
-            return [0.0] * self.dimensions
-
-        base = text.lower().strip()
-        vector = [0.0] * self.dimensions
-        for index in range(self.dimensions):
-            digest = hashlib.sha256(f"{base}|{index}".encode("utf-8")).digest()
-            raw = int.from_bytes(digest[:8], byteorder="big", signed=False)
-            vector[index] = ((raw % 2_000_000) / 1_000_000.0) - 1.0
-
-        tokens = base.split()
-        if tokens:
-            vector[0] = min(len(tokens) / 20.0, 1.0)
-            vector[1] = min(len(base) / 200.0, 1.0)
-        return vector
-
-    def encode(self, sentences: list[str]) -> Any:
-        return [self._vector_for(sentence) for sentence in sentences]
-
-
-class SentenceTransformerEmbedding:
-    def __init__(self, model_name: str = "BAAI/bge-m3") -> None:
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
-            raise RuntimeError("sentence-transformers is not installed") from exc
-
-        try:
-            self._model = SentenceTransformer(model_name)
-        except Exception as exc:  # pragma: no cover - depends on local environment
-            logger.warning(
-                "Could not load embedding model '%s'; using local fallback. Reason: %s",
-                model_name,
-                exc,
-            )
-            self._model = LocalFallbackEmbedding()
-
-    def encode(self, sentences: list[str]) -> Any:
-        if hasattr(self._model, "encode"):
-            try:
-                return self._model.encode(sentences, normalize_embeddings=True)
-            except TypeError:
-                return self._model.encode(sentences)
-        return self._model.encode(sentences)
-
-
-def embedding_rows(embeddings: Any) -> list[list[float]]:
-    if hasattr(embeddings, "tolist"):
-        embeddings = embeddings.tolist()
-    return embeddings
-
-
-def normalize_distance_to_similarity(distance: object, collection_space: str = "") -> float:
-    try:
-        value = float(distance)
-    except (TypeError, ValueError):
-        return 0.0
-    if value != value:
-        return 0.0
-    space = (collection_space or "").lower()
-    if space in {"cosine", "ip"}:
-        return max(0.0, min(1.0, 1.0 - value))
-    if space == "l2":
-        return max(0.0, min(1.0, 1.0 / (1.0 + value)))
-    if 0.0 <= value <= 1.0:
-        return max(0.0, min(1.0, 1.0 - value))
-    return max(0.0, min(1.0, 1.0 / (1.0 + value)))
 
 
 def chunk_transcript(segments: list[dict[str, object]], max_characters: int = 1000) -> list[TranscriptChunk]:
@@ -147,24 +64,15 @@ def chunk_transcript(segments: list[dict[str, object]], max_characters: int = 10
 class TranscriptRAGService:
     def __init__(
         self,
-        transcript_dir: Path | None = None,
-        chroma_dir: Path | None = None,
-        embedding_model: EmbeddingModel | None = None,
-        chroma_client: Any | None = None,
+        blob_store: BlobStore,
+        embedder: Embedder,
+        vector_store: VectorStore,
         max_chunk_characters: int = 1000,
     ) -> None:
-        self.transcript_dir = transcript_dir or settings.project_root / "data" / "transcripts"
-        self.chroma_dir = chroma_dir or settings.project_root / "data" / "chroma"
-        self.embedding_model = embedding_model or SentenceTransformerEmbedding()
+        self.blob_store = blob_store
+        self.embedder = embedder
+        self.vector_store = vector_store
         self.max_chunk_characters = max_chunk_characters
-        if chroma_client is None:
-            try:
-                import chromadb
-            except ImportError as exc:
-                raise RuntimeError("chromadb is not installed") from exc
-            self.chroma_dir.mkdir(parents=True, exist_ok=True)
-            chroma_client = chromadb.PersistentClient(path=str(self.chroma_dir))
-        self.client = chroma_client
 
     @staticmethod
     def collection_name(video_id: str) -> str:
@@ -173,10 +81,11 @@ class TranscriptRAGService:
         return f"video_{video_id}"
 
     def index_transcript(self, video_id: str, on_progress: Callable[[str, int, int], None] | None = None) -> list[dict[str, object]]:
-        transcript_path = self.transcript_dir / f"{video_id}.json"
-        if not transcript_path.exists():
+        transcript_key = f"transcripts/{video_id}.json"
+        if not self.blob_store.exists(transcript_key):
             return []
         try:
+            transcript_path = self.blob_store.open(transcript_key)
             payload = json.loads(transcript_path.read_text(encoding="utf-8"))
             segments = payload.get("segments", [])
             if not isinstance(segments, list):
@@ -187,21 +96,22 @@ class TranscriptRAGService:
         chunks = chunk_transcript(segments, self.max_chunk_characters)
         if on_progress:
             on_progress("chunking", len(chunks), len(chunks))
-        collection = self.client.get_or_create_collection(self.collection_name(video_id))
-        existing = collection.get().get("ids", [])
-        if existing:
-            collection.delete(ids=existing)
-        if not chunks:
-            return []
         source = str(transcript_path)
+        if not chunks:
+            self.vector_store.upsert(video_id, [])
+            return []
         texts = [chunk.text for chunk in chunks]
         if on_progress:
             on_progress("embedding", 0, len(texts))
-        collection.upsert(
-            ids=[chunk.chunk_id for chunk in chunks],
-            documents=texts,
-            metadatas=[chunk.metadata(video_id, source) for chunk in chunks],
-            embeddings=embedding_rows(self.embedding_model.encode(texts)),
+        embeddings = self.embedder.embed(texts)
+        if len(embeddings) != len(chunks):
+            raise RuntimeError("Embedder returned an unexpected number of vectors")
+        self.vector_store.upsert(
+            video_id,
+            [
+                {"id": chunk.chunk_id, "text": chunk.text, "metadata": chunk.metadata(video_id, source), "embedding": embedding}
+                for chunk, embedding in zip(chunks, embeddings)
+            ],
         )
         if on_progress:
             on_progress("embedding", len(texts), len(texts))
@@ -230,45 +140,10 @@ class TranscriptRAGService:
     def retrieve_relevant_chunks(self, video_id: str, question: str, top_k: int = 5) -> list[dict[str, object]]:
         if not question or top_k < 1:
             return []
-        transcript_path = self.transcript_dir / f"{video_id}.json"
-        if not transcript_path.exists():
+        if not self.blob_store.exists(f"transcripts/{video_id}.json"):
             return []
-        collection = self.client.get_collection(self.collection_name(video_id))
-        query_vector = embedding_rows(self.embedding_model.encode([question]))[0]
-        result = collection.query(
-            query_embeddings=[query_vector],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances", "embeddings"],
-        )
-        documents = (result.get("documents") or [[]])[0]
-        metadatas = (result.get("metadatas") or [[]])[0]
-        distances = (result.get("distances") or [[]])[0]
-        embeddings = (result.get("embeddings") or [[]])[0]
-        collection_space = ""
-        metadata = getattr(collection, "metadata", None)
-        if isinstance(metadata, dict):
-            collection_space = str(metadata.get("hnsw:space") or metadata.get("space") or "")
-        candidates: list[dict[str, object]] = []
-        for index, (text, metadata) in enumerate(zip(documents, metadatas)):
-            if not isinstance(metadata, dict) or metadata.get("video_id") != video_id:
-                continue
-            distance = distances[index] if index < len(distances) else None
-            embedding = embeddings[index] if index < len(embeddings) and isinstance(embeddings[index], (list, tuple)) else None
-            if embedding is not None:
-                candidate_norm = sum(value * value for value in embedding) ** 0.5 or 1.0
-                query_norm = sum(value * value for value in query_vector) ** 0.5 or 1.0
-                cosine = sum(a * b for a, b in zip(query_vector, embedding)) / (query_norm * candidate_norm)
-                similarity = max(0.0, min(1.0, cosine))
-            else:
-                similarity = normalize_distance_to_similarity(distance, collection_space)
-            candidates.append(
-                {
-                    "text": text,
-                    "metadata": metadata,
-                    "distance": distance,
-                    "similarity": similarity,
-                }
-            )
+        query_vector = self.embedder.embed([question])[0]
+        candidates = self.vector_store.query(video_id, query_vector, top_k)
         return self.filter_relevant_chunks(candidates)
 
     def get_transcript_context(self, video_id: str) -> str:
@@ -280,10 +155,11 @@ class TranscriptRAGService:
         question: str = "",
         max_characters: int = 12000,
     ) -> list[dict[str, object]]:
-        transcript_path = self.transcript_dir / f"{video_id}.json"
-        if not transcript_path.exists():
+        transcript_key = f"transcripts/{video_id}.json"
+        if not self.blob_store.exists(transcript_key):
             return []
         try:
+            transcript_path = self.blob_store.open(transcript_key)
             payload = json.loads(transcript_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []

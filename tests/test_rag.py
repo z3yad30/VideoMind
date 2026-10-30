@@ -1,53 +1,31 @@
-import json
 from pathlib import Path
 
 import pytest
 
+from backend.app.adapters.embeddings import SentenceTransformerEmbedder
 from backend.app.services.rag import TranscriptRAGService
-
-
-class FakeEmbeddings:
-    def encode(self, sentences: list[str]):
-        return [[float(len(sentence)), float(sentence.lower().count("python"))] for sentence in sentences]
+from tests.fakes import FakeBlobStore, FakeEmbedder, FakeVectorStore
 
 
 def make_service(tmp_path: Path) -> TranscriptRAGService:
-    return TranscriptRAGService(
-        transcript_dir=tmp_path / "transcripts",
-        chroma_dir=tmp_path / "chroma",
-        embedding_model=FakeEmbeddings(),
-    )
+    return TranscriptRAGService(FakeBlobStore(tmp_path / "data"), FakeEmbedder(), FakeVectorStore())
 
 
 def write_transcript(tmp_path: Path, video_id: str, segments: list[dict[str, object]]) -> None:
-    transcript_dir = tmp_path / "transcripts"
-    transcript_dir.mkdir(parents=True, exist_ok=True)
-    (transcript_dir / f"{video_id}.json").write_text(
-        json.dumps({"video_id": video_id, "segments": segments}), encoding="utf-8"
-    )
+    FakeBlobStore(tmp_path / "data").write_transcript(video_id, segments)
 
 
 def test_video_collections_are_isolated(tmp_path: Path) -> None:
-    class MatchingCollection:
-        def query(self, **kwargs):
-            return {
-                "documents": [["Cooking uses heat"]],
-                "metadatas": [[{"video_id": "b", "start": 3.0, "end": 4.0}]],
-                "distances": [[0.12]],
-            }
-
-    class MatchingClient:
-        def get_collection(self, name):
-            assert name == "video_b"
-            return MatchingCollection()
-
     write_transcript(tmp_path, "a", [{"text": "Python is a language", "start": 1, "end": 2}])
     write_transcript(tmp_path, "b", [{"text": "Cooking uses heat", "start": 3, "end": 4}])
     service = TranscriptRAGService(
-        transcript_dir=tmp_path / "transcripts",
-        chroma_dir=tmp_path / "chroma",
-        embedding_model=FakeEmbeddings(),
-        chroma_client=MatchingClient(),
+        FakeBlobStore(tmp_path / "data"),
+        FakeEmbedder(),
+        FakeVectorStore([{
+            "text": "Cooking uses heat",
+            "metadata": {"video_id": "b", "start": 3.0, "end": 4.0},
+            "similarity": 0.88,
+        }]),
     )
 
     results = service.retrieve_relevant_chunks("b", "Python language")
@@ -57,25 +35,16 @@ def test_video_collections_are_isolated(tmp_path: Path) -> None:
 
 
 def test_metadata_timestamps_survive_storage_and_retrieval(tmp_path: Path) -> None:
-    class MatchingCollection:
-        def query(self, **kwargs):
-            return {
-                "documents": [["A timestamped fact"]],
-                "metadatas": [[{"video_id": "a", "chunk_id": "0", "start": 12.5, "end": 18.75, "source": str(tmp_path / "transcripts" / "a.json")}]],
-                "distances": [[0.08]],
-            }
-
-    class MatchingClient:
-        def get_collection(self, name):
-            assert name == "video_a"
-            return MatchingCollection()
-
+    transcript_path = tmp_path / "data" / "transcripts" / "a.json"
     write_transcript(tmp_path, "a", [{"text": "A timestamped fact", "start": 12.5, "end": 18.75}])
     service = TranscriptRAGService(
-        transcript_dir=tmp_path / "transcripts",
-        chroma_dir=tmp_path / "chroma",
-        embedding_model=FakeEmbeddings(),
-        chroma_client=MatchingClient(),
+        FakeBlobStore(tmp_path / "data"),
+        FakeEmbedder(),
+        FakeVectorStore([{
+            "text": "A timestamped fact",
+            "metadata": {"video_id": "a", "chunk_id": "0", "start": 12.5, "end": 18.75, "source": str(transcript_path)},
+            "similarity": 0.92,
+        }]),
     )
 
     result = service.retrieve_relevant_chunks("a", "timestamped fact")[0]
@@ -85,24 +54,11 @@ def test_metadata_timestamps_survive_storage_and_retrieval(tmp_path: Path) -> No
         "chunk_id": "0",
         "start": 12.5,
         "end": 18.75,
-        "source": str(tmp_path / "transcripts" / "a.json"),
+        "source": str(transcript_path),
     }
 
 
 def test_relevant_chunks_and_context_are_returned(tmp_path: Path) -> None:
-    class MatchingCollection:
-        def query(self, **kwargs):
-            return {
-                "documents": [["Python makes embeddings"]],
-                "metadatas": [[{"video_id": "a", "start": 2.0, "end": 3.0}]],
-                "distances": [[0.12]],
-            }
-
-    class MatchingClient:
-        def get_collection(self, name):
-            assert name == "video_a"
-            return MatchingCollection()
-
     write_transcript(
         tmp_path,
         "a",
@@ -112,10 +68,13 @@ def test_relevant_chunks_and_context_are_returned(tmp_path: Path) -> None:
         ],
     )
     service = TranscriptRAGService(
-        transcript_dir=tmp_path / "transcripts",
-        chroma_dir=tmp_path / "chroma",
-        embedding_model=FakeEmbeddings(),
-        chroma_client=MatchingClient(),
+        FakeBlobStore(tmp_path / "data"),
+        FakeEmbedder(),
+        FakeVectorStore([{
+            "text": "Python makes embeddings",
+            "metadata": {"video_id": "a", "start": 2.0, "end": 3.0},
+            "similarity": 0.9,
+        }]),
         max_chunk_characters=20,
     )
 
@@ -165,6 +124,22 @@ def test_missing_or_empty_collections_are_handled_gracefully(tmp_path: Path) -> 
     assert service.retrieve_relevant_chunks("empty", "anything") == []
 
 
+def test_indexing_rejects_an_embedder_result_count_mismatch(tmp_path: Path) -> None:
+    class BrokenEmbedder:
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            return []
+
+    service = TranscriptRAGService(
+        FakeBlobStore(tmp_path / "data"),
+        BrokenEmbedder(),
+        FakeVectorStore(),
+    )
+    write_transcript(tmp_path, "video", [{"text": "transcript", "start": 0.0, "end": 1.0}])
+
+    with pytest.raises(RuntimeError, match="unexpected number of vectors"):
+        service.index_transcript("video")
+
+
 def test_raw_transcript_fallback_is_bounded_and_question_focused(tmp_path: Path) -> None:
     write_transcript(tmp_path, "a", [
         {"text": "An unrelated introduction.", "start": 0, "end": 1},
@@ -181,43 +156,28 @@ def test_raw_transcript_fallback_is_bounded_and_question_focused(tmp_path: Path)
 
 
 def test_retrieval_rejects_chunks_from_another_video(tmp_path: Path) -> None:
-    class ContaminatedCollection:
-        def query(self, **kwargs):
-            return {
-                "documents": [["Video B secret"]],
-                "metadatas": [[{"video_id": "b", "start": 0.0, "end": 1.0}]],
-                "distances": [[0.1]],
-            }
-
-    class ContaminatedClient:
-        def get_collection(self, name):
-            assert name == "video_a"
-            return ContaminatedCollection()
-
     service = TranscriptRAGService(
-        transcript_dir=tmp_path / "transcripts",
-        chroma_dir=tmp_path / "chroma",
-        embedding_model=FakeEmbeddings(),
-        chroma_client=ContaminatedClient(),
+        FakeBlobStore(tmp_path / "data"),
+        FakeEmbedder(),
+        FakeVectorStore([{
+            "text": "Video B secret",
+            "metadata": {"video_id": "b", "start": 0.0, "end": 1.0},
+            "similarity": 0.99,
+        }]),
     )
 
     assert service.retrieve_relevant_chunks("a", "anything") == []
 
 
 def test_retrieval_surfaces_backend_failures(tmp_path: Path) -> None:
-    class BrokenCollection:
-        def query(self, **kwargs):
+    class BrokenVectorStore(FakeVectorStore):
+        def query(self, video_id, embedding, top_k):
             raise RuntimeError("embedding backend unavailable")
 
-    class BrokenClient:
-        def get_collection(self, name):
-            return BrokenCollection()
-
     service = TranscriptRAGService(
-        transcript_dir=tmp_path / "transcripts",
-        chroma_dir=tmp_path / "chroma",
-        embedding_model=FakeEmbeddings(),
-        chroma_client=BrokenClient(),
+        FakeBlobStore(tmp_path / "data"),
+        FakeEmbedder(),
+        BrokenVectorStore(),
     )
     write_transcript(tmp_path, "a", [{"text": "indexed transcript", "start": 0, "end": 1}])
 
@@ -228,8 +188,6 @@ def test_retrieval_surfaces_backend_failures(tmp_path: Path) -> None:
 def test_sentence_transformer_load_failure_uses_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     import sys
 
-    import backend.app.services.rag as rag_module
-
     class FakeSentenceTransformer:
         def __init__(self, *_args, **_kwargs):
             raise OSError("BAAI/bge-m3 does not appear to have a file named pytorch_model.bin")
@@ -237,8 +195,8 @@ def test_sentence_transformer_load_failure_uses_fallback(monkeypatch: pytest.Mon
     fake_mod = type("FakeMod", (), {"SentenceTransformer": FakeSentenceTransformer})
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake_mod)
 
-    service = rag_module.SentenceTransformerEmbedding()
-    vectors = service.encode(["alpha beta", "gamma"])
+    service = SentenceTransformerEmbedder()
+    vectors = service.embed(["alpha beta", "gamma"])
 
     assert isinstance(vectors, list)
     assert len(vectors) == 2

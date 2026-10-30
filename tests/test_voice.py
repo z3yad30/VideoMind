@@ -7,6 +7,7 @@ from httpx import ASGITransport, AsyncClient
 
 from backend.app.main import app
 from backend.app.api.dependencies import get_current_user
+from backend.app.container import get_video_processing_service, get_voice_service
 from backend.app.services.auth import AuthenticatedUser
 from backend.app.services.asr import ASRSegment
 from backend.app.services.llm import SUMMARY_FIELDS, VideoAIService
@@ -14,23 +15,13 @@ from backend.app.services.media import MediaService
 from backend.app.services.voice import VoiceQuestionService
 import backend.app.api.videos as videos_api
 from backend.app.services.video_storage import VideoOwnershipStore
+from tests.fakes import FakeBlobStore, FakeTTS
 
 
 class FakeASR:
     def transcribe(self, audio_path: Path) -> list[ASRSegment]:
         assert audio_path.exists()
         return [ASRSegment("What happened next?", 0, 1)]
-
-
-class FakeTTS:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, Path]] = []
-
-    def synthesize(self, text: str, output_path: Path) -> Path:
-        self.calls.append((text, output_path))
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(b"wav")
-        return output_path
 
 
 class FakeAI:
@@ -58,13 +49,13 @@ async def test_voice_question_runs_asr_rag_and_tts_without_indexing(monkeypatch:
     ai = FakeAI()
     tts = FakeTTS()
     service = VoiceQuestionService(
-        ai=ai, media=MediaService(), asr=FakeASR(), tts=tts, audio_dir=tmp_path / "answers"
+        ai=ai, media=MediaService(), transcriber=FakeASR(), tts=tts, blob_store=FakeBlobStore(tmp_path / "data")
     )
-    monkeypatch.setattr(videos_api, "voice_service", service)
-    monkeypatch.setattr(
-        videos_api,
-        "video_service",
-        SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")),
+    monkeypatch.setitem(app.dependency_overrides, get_voice_service, lambda: service)
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        get_video_processing_service,
+        lambda: SimpleNamespace(get_job=lambda video_id: SimpleNamespace(status="completed")),
     )
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -90,17 +81,17 @@ def test_summary_is_synthesized_with_replaceable_tts(tmp_path: Path) -> None:
             return summary
 
     class FakeRAG:
-        def index_transcript(self, video_id: str) -> list[dict[str, object]]:
+        def index_transcript(self, video_id: str, on_progress=None) -> list[dict[str, object]]:
             return [{"text": "transcript"}]
 
     tts = FakeTTS()
     service = VideoAIService(
-        llm=FakeLLM(), rag=FakeRAG(), summary_dir=tmp_path / "summaries", tts=tts, audio_dir=tmp_path / "audio"
+        llm=FakeLLM(), rag=FakeRAG(), blob_store=FakeBlobStore(tmp_path / "data"), tts=tts
     )
 
     service.index_and_summarize("video-1")
 
-    assert service.get_summary_audio_path("video-1") == tmp_path / "audio" / "video-1.wav"
+    assert service.get_summary_audio_path("video-1") == tmp_path / "data" / "audio" / "summaries" / "video-1.wav"
     assert tts.calls[0][0].startswith("Overview: Overview")
 
 
@@ -110,7 +101,8 @@ def test_tts_failure_is_normalized(tmp_path: Path) -> None:
             raise OSError("audio device unavailable")
 
     service = VoiceQuestionService(
-        ai=FakeAI(), media=MediaService(), asr=FakeASR(), tts=BrokenTTS(), audio_dir=tmp_path / "answers"
+        ai=FakeAI(), media=MediaService(), transcriber=FakeASR(), tts=BrokenTTS(),
+        blob_store=FakeBlobStore(tmp_path / "data")
     )
 
     with pytest.raises(RuntimeError, match="TTS synthesis failed"):
