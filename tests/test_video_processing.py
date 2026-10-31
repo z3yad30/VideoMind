@@ -423,6 +423,9 @@ def test_youtube_downloader_persists_source_under_video_id(monkeypatch: pytest.M
     assert result == tmp_path / "abc123.mp4"
     assert calls[0][-1] == "https://www.youtube.com/watch?v=example"
     assert "--no-playlist" in calls[0]
+    assert "--use-extractors" in calls[0]
+    assert "youtube" in calls[0]
+    assert "--allowed-extractors" not in calls[0]
     assert result.exists()
 
 

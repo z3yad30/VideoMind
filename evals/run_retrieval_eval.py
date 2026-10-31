@@ -20,6 +20,12 @@ from backend.app.services.rag import DEFAULT_TOP_K, TranscriptRAGService
 
 THRESHOLDS = (0.55, 0.60, 0.65, 0.70, 0.75, 0.80)
 PLACEHOLDER_MARKER = "PLACEHOLDER"
+VARIANTS = {
+    "baseline": (False, False, False),
+    "QUERY_REWRITE": (True, False, False),
+    "HYBRID": (False, True, False),
+    "RERANK": (False, False, True),
+}
 
 
 @dataclass(frozen=True)
@@ -29,6 +35,7 @@ class EvaluationRow:
     expected_answer_keywords: tuple[str, ...]
     expected_start_s: float
     expected_end_s: float
+    prior_messages: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -51,12 +58,24 @@ def load_dataset(path: Path) -> list[EvaluationRow]:
             keywords = data["expected_answer_keywords"]
             if not isinstance(keywords, list) or not all(isinstance(item, str) for item in keywords):
                 raise TypeError("expected_answer_keywords must be a list of strings")
+            prior_messages = data.get("prior_messages", [])
+            if not isinstance(prior_messages, list) or not all(
+                isinstance(item, dict)
+                and item.get("role") in {"user", "assistant"}
+                and isinstance(item.get("content"), str)
+                for item in prior_messages
+            ):
+                raise TypeError("prior_messages must be a list of {role, content} messages")
             row = EvaluationRow(
                 video_id=str(data["video_id"]),
                 question=str(data["question"]),
                 expected_answer_keywords=tuple(keywords),
                 expected_start_s=float(data["expected_start_s"]),
                 expected_end_s=float(data["expected_end_s"]),
+                prior_messages=tuple(
+                    {"role": str(item["role"]), "content": str(item["content"])}
+                    for item in prior_messages
+                ),
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"{path}:{line_number}: invalid retrieval-eval row: {exc}") from exc
@@ -131,6 +150,10 @@ def collect_candidates(
     rag: TranscriptRAGService,
     row: EvaluationRow,
     session_factory: Callable[[], OrmSession] | None = None,
+    *,
+    question: str | None = None,
+    hybrid_enabled: bool = False,
+    rerank_enabled: bool = False,
 ) -> list[dict[str, object]]:
     artifact_id = resolve_artifact_id(row.video_id, session_factory)
     transcript_key = f"transcripts/{artifact_id}.json"
@@ -142,10 +165,13 @@ def collect_candidates(
         raise FileNotFoundError(
             f"Video {row.video_id!r} has no indexed vector collection for artifact {artifact_id!r}"
         )
-    embeddings = rag.embedder.embed([row.question])
-    if len(embeddings) != 1:
-        raise RuntimeError(f"Embedder returned {len(embeddings)} vectors for one query")
-    return rag.vector_store.query(artifact_id, embeddings[0], DEFAULT_TOP_K)
+    return rag.retrieve_candidates(
+        artifact_id,
+        question or row.question,
+        DEFAULT_TOP_K,
+        hybrid_enabled=hybrid_enabled,
+        rerank_enabled=rerank_enabled,
+    )
 
 
 def resolve_artifact_id(
@@ -163,43 +189,74 @@ def evaluate(
     rag: TranscriptRAGService,
     rows: Sequence[EvaluationRow],
     session_factory: Callable[[], OrmSession] | None = None,
-) -> list[tuple[float, Metrics]]:
+    rewrite_query: Callable[[str, list[dict[str, str]]], str] | None = None,
+) -> dict[str, list[tuple[float, Metrics]]]:
     usable_rows = [row for row in rows if not is_placeholder(row)]
     if not usable_rows:
         raise ValueError(
             "The dataset contains only placeholder rows. Replace them with real indexed video examples."
         )
-    candidates_by_row = [
-        (row, collect_candidates(rag, row, session_factory))
-        for row in usable_rows
-    ]
-    results: list[tuple[float, Metrics]] = []
-    for threshold in THRESHOLDS:
-        filtered = [
+    results: dict[str, list[tuple[float, Metrics]]] = {}
+    for variant, (rewrite_enabled, hybrid_enabled, rerank_enabled) in VARIANTS.items():
+        candidates_by_row = []
+        rewritten_count = 0
+        for row in usable_rows:
+            question = row.question
+            if rewrite_enabled and row.prior_messages and rewrite_query is not None:
+                question = rewrite_query(row.question, list(row.prior_messages))
+                rewritten_count += question != row.question
+            candidates_by_row.append(
+                (
+                    row,
+                    collect_candidates(
+                        rag,
+                        row,
+                        session_factory,
+                        question=question,
+                        hybrid_enabled=hybrid_enabled,
+                        rerank_enabled=rerank_enabled,
+                    ),
+                )
+            )
+        if rewrite_enabled:
+            print(
+                f"QUERY_REWRITE applied to {rewritten_count}/{len(usable_rows)} questions "
+                "(rows without prior_messages use the original question)."
+            )
+        results[variant] = [
             (
-                row,
-                TranscriptRAGService.filter_relevant_chunks(
-                    candidates,
-                    min_similarity=threshold,
+                threshold,
+                score_retrieval(
+                    [
+                        (
+                            row,
+                            TranscriptRAGService.filter_relevant_chunks(
+                                candidates,
+                                min_similarity=threshold,
+                            ),
+                        )
+                        for row, candidates in candidates_by_row
+                    ]
                 ),
             )
-            for row, candidates in candidates_by_row
+            for threshold in THRESHOLDS
         ]
-        results.append((threshold, score_retrieval(filtered)))
     return results
 
 
-def print_results(results: Sequence[tuple[float, Metrics]]) -> None:
-    print(f"{'MIN_SIMILARITY':>14}  {'RECALL@5':>9}  {'MRR':>7}  {'RAW FALLBACK':>12}  {'QUESTIONS':>9}")
-    print("-" * 62)
-    for threshold, metrics in results:
-        print(
-            f"{threshold:14.2f}  "
-            f"{metrics.recall_at_5:9.3f}  "
-            f"{metrics.mrr:7.3f}  "
-            f"{metrics.raw_transcript_fallback_fraction:12.3f}  "
-            f"{metrics.question_count:9d}"
-        )
+def print_results(results: dict[str, list[tuple[float, Metrics]]]) -> None:
+    print(f"{'FEATURE':>16}  {'MIN_SIMILARITY':>14}  {'RECALL@5':>9}  {'MRR':>7}  {'RAW FALLBACK':>12}  {'QUESTIONS':>9}")
+    print("-" * 79)
+    for variant, variant_results in results.items():
+        for threshold, metrics in variant_results:
+            print(
+                f"{variant:>16}  "
+                f"{threshold:14.2f}  "
+                f"{metrics.recall_at_5:9.3f}  "
+                f"{metrics.mrr:7.3f}  "
+                f"{metrics.raw_transcript_fallback_fraction:12.3f}  "
+                f"{metrics.question_count:9d}"
+            )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -220,7 +277,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        results = evaluate(get_container().rag, rows)
+        container = get_container()
+        results = evaluate(container.rag, rows, rewrite_query=container.ai.rewrite_query)
     except (OSError, ValueError, FileNotFoundError, RuntimeError) as exc:
         print(f"Retrieval evaluation failed: {exc}", file=sys.stderr)
         return 1

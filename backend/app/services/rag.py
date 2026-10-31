@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from backend.app.ports import BlobStore, Embedder, VectorStore
+from backend.app.ports import Reranker
+from backend.app.core.config import settings
 from backend.app.utils.vector import normalize_distance_to_similarity
 
 MIN_SIMILARITY = 0.70
@@ -68,11 +70,18 @@ class TranscriptRAGService:
         embedder: Embedder,
         vector_store: VectorStore,
         max_chunk_characters: int = 1000,
+        reranker: Reranker | None = None,
+        *,
+        hybrid_enabled: bool | None = None,
+        rerank_enabled: bool | None = None,
     ) -> None:
         self.blob_store = blob_store
         self.embedder = embedder
         self.vector_store = vector_store
         self.max_chunk_characters = max_chunk_characters
+        self.reranker = reranker
+        self.hybrid_enabled = settings.hybrid if hybrid_enabled is None else hybrid_enabled
+        self.rerank_enabled = settings.rerank if rerank_enabled is None else rerank_enabled
 
     @staticmethod
     def collection_name(video_id: str) -> str:
@@ -161,13 +170,38 @@ class TranscriptRAGService:
             and float(chunk.get("similarity", 0.0) or 0.0) >= dynamic_threshold
         ]
 
-    def retrieve_relevant_chunks(self, video_id: str, question: str, top_k: int = 5) -> list[dict[str, object]]:
+    def retrieve_candidates(
+        self,
+        video_id: str,
+        question: str,
+        top_k: int = DEFAULT_TOP_K,
+        *,
+        hybrid_enabled: bool | None = None,
+        rerank_enabled: bool | None = None,
+    ) -> list[dict[str, object]]:
         if not question or top_k < 1:
             return []
         if not self.blob_store.exists(f"transcripts/{video_id}.json"):
             return []
-        query_vector = self.embedder.embed([question])[0]
-        candidates = self.vector_store.query(video_id, query_vector, top_k)
+        hybrid = self.hybrid_enabled if hybrid_enabled is None else hybrid_enabled
+        rerank = self.rerank_enabled if rerank_enabled is None else rerank_enabled
+        candidate_count = max(20, top_k) if rerank else top_k
+        query_embeddings = self.embedder.embed([question])
+        if len(query_embeddings) != 1:
+            raise RuntimeError("Embedder returned an unexpected number of query vectors")
+        query_vector = query_embeddings[0]
+        if hybrid:
+            candidates = self.vector_store.query_hybrid(video_id, query_vector, question, candidate_count)
+        else:
+            candidates = self.vector_store.query(video_id, query_vector, candidate_count)
+        if rerank:
+            if self.reranker is None:
+                raise RuntimeError("RERANK=true requires a configured reranker")
+            candidates = self.reranker.rerank(question, candidates, top_k)
+        return candidates[:top_k]
+
+    def retrieve_relevant_chunks(self, video_id: str, question: str, top_k: int = 5) -> list[dict[str, object]]:
+        candidates = self.retrieve_candidates(video_id, question, top_k)
         return self.filter_relevant_chunks(candidates)
 
     def get_transcript_context(self, video_id: str) -> str:

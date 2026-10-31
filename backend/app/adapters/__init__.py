@@ -1,6 +1,7 @@
 from backend.app.adapters.blob_store import LocalBlobStore
 from backend.app.adapters.embeddings import SentenceTransformerEmbedder
 from backend.app.adapters.llm import GroqLLMClient
+from backend.app.adapters.reranker import SentenceTransformerReranker
 from backend.app.adapters.sql_job_queue import JobQueueError, SqlJobQueue
 from backend.app.adapters.transcriber import FasterWhisperTranscriber
 from backend.app.adapters.tts import Pyttsx3TTS
@@ -15,4 +16,5 @@ __all__ = [
     "Pyttsx3TTS",
     "SentenceTransformerEmbedder",
     "SqlJobQueue",
+    "SentenceTransformerReranker",
 ]

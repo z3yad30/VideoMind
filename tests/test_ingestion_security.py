@@ -117,6 +117,23 @@ def test_youtube_validator_rejects_noncanonical_hosts() -> None:
         MediaService.validate_youtube_url("https://m.youtube.com/watch?v=abc")
 
 
+def test_youtube_duration_uses_supported_youtube_extractor_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout='{"duration": 12.5}', stderr="")
+
+    monkeypatch.setattr("backend.app.services.media.subprocess.run", fake_run)
+
+    assert MediaService().get_youtube_duration("https://youtube.com/watch?v=abc") == 12.5
+    assert "--use-extractors" in commands[0]
+    assert "youtube" in commands[0]
+    assert "--allowed-extractors" not in commands[0]
+
+
 def test_video_and_duration_quotas_use_persisted_video_durations(tmp_path: Path) -> None:
     database = create_database(tmp_path)
     user_service = AuthenticationService(UserStore(UserRepo(database.session_factory)))

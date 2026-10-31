@@ -4,7 +4,7 @@ import pytest
 
 from backend.app.adapters.embeddings import SentenceTransformerEmbedder
 from backend.app.services.rag import TranscriptRAGService
-from tests.fakes import FakeBlobStore, FakeEmbedder, FakeVectorStore
+from tests.fakes import FakeBlobStore, FakeEmbedder, FakeReranker, FakeVectorStore
 
 
 def make_service(tmp_path: Path) -> TranscriptRAGService:
@@ -83,6 +83,48 @@ def test_relevant_chunks_and_context_are_returned(tmp_path: Path) -> None:
     assert len(results) == 1
     assert "Python" in results[0]["text"]
     assert "2.0-3.0" in service.build_rag_context("a", "How does Python work?", top_k=1)
+
+
+def test_hybrid_flag_routes_query_through_vector_store_port(tmp_path: Path) -> None:
+    write_transcript(tmp_path, "a", [{"text": "transcript", "start": 0.0, "end": 1.0}])
+    vector_store = FakeVectorStore([{
+        "text": "Hybrid result",
+        "metadata": {"video_id": "a", "start": 0.0, "end": 1.0},
+        "similarity": 0.9,
+    }])
+    service = TranscriptRAGService(FakeBlobStore(tmp_path / "data"), FakeEmbedder(), vector_store)
+
+    candidates = service.retrieve_candidates("a", "hybrid query", hybrid_enabled=True)
+
+    assert candidates[0]["text"] == "Hybrid result"
+    assert vector_store.hybrid_queries[0][2:] == ("hybrid query", 5)
+
+
+def test_rerank_flag_fetches_twenty_then_returns_five(tmp_path: Path) -> None:
+    write_transcript(tmp_path, "a", [{"text": "transcript", "start": 0.0, "end": 1.0}])
+    vector_store = FakeVectorStore([
+        {
+            "id": f"chunk-{index}",
+            "text": f"chunk-{index}",
+            "metadata": {"video_id": "a", "start": float(index), "end": float(index + 1)},
+            "similarity": 0.9,
+        }
+        for index in range(20)
+    ])
+    service = TranscriptRAGService(
+        FakeBlobStore(tmp_path / "data"),
+        FakeEmbedder(),
+        vector_store,
+        reranker=FakeReranker(),
+        rerank_enabled=True,
+    )
+
+    candidates = service.retrieve_candidates("a", "question", top_k=5)
+
+    assert vector_store.queries[0][2] == 20
+    assert [candidate["text"] for candidate in candidates] == [
+        "chunk-19", "chunk-18", "chunk-17", "chunk-16", "chunk-15",
+    ]
 
 
 def test_dynamic_similarity_threshold_keeps_only_strong_matches() -> None:

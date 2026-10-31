@@ -24,9 +24,26 @@ class VectorStore(Protocol):
 
     def query(self, video_id: str, embedding: list[float], top_k: int) -> list[dict[str, object]]: ...
 
+    def query_hybrid(
+        self,
+        video_id: str,
+        embedding: list[float],
+        query_text: str,
+        top_k: int,
+    ) -> list[dict[str, object]]: ...
+
     def exists(self, video_id: str) -> bool: ...
 
     def delete_video(self, video_id: str) -> None: ...
+
+
+class Reranker(Protocol):
+    def rerank(
+        self,
+        query: str,
+        candidates: list[dict[str, object]],
+        top_k: int,
+    ) -> list[dict[str, object]]: ...
 
 
 class LLMClient(Protocol):

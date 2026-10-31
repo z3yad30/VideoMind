@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     question_rate_limit: str = "30/minute"
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
+    query_rewrite: bool = False
+    hybrid: bool = False
+    rerank: bool = False
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     log_level: str = "INFO"
     asr_model: str = "base"
     asr_device: str = "cpu"
@@ -66,5 +70,4 @@ class Settings(BaseSettings):
         self.worker_mode = self.worker_mode.casefold()
         return self
 
-settings = Settings()
 settings = Settings()

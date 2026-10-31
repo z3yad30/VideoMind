@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,7 @@ class ChromaVectorStore:
         )
         documents = (result.get("documents") or [[]])[0]
         metadatas = (result.get("metadatas") or [[]])[0]
+        ids = (result.get("ids") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]
         embeddings = (result.get("embeddings") or [[]])[0]
         metadata = getattr(collection, "metadata", None)
@@ -65,8 +67,102 @@ class ChromaVectorStore:
                 )
             else:
                 similarity = normalize_distance_to_similarity(distance, space)
-            candidates.append({"text": text, "metadata": item_metadata, "distance": distance, "similarity": similarity})
+            candidate_id = ids[index] if index < len(ids) else item_metadata.get("chunk_id", str(index))
+            candidates.append(
+                {
+                    "id": str(candidate_id),
+                    "text": text,
+                    "metadata": item_metadata,
+                    "distance": distance,
+                    "similarity": similarity,
+                }
+            )
         return candidates
+
+    def query_hybrid(
+        self,
+        video_id: str,
+        embedding: list[float],
+        query_text: str,
+        top_k: int,
+    ) -> list[dict[str, object]]:
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError as exc:
+            raise RuntimeError("rank-bm25 is required when HYBRID=true") from exc
+
+        dense_candidates = self.query(video_id, embedding, top_k)
+        def tokenize(text: str) -> list[str]:
+            return re.findall(r"\w+", text.casefold())
+
+        collection = self.client.get_collection(self.collection_name(video_id))
+        stored = collection.get(include=["documents", "metadatas"])
+        ids = stored.get("ids") or []
+        documents = stored.get("documents") or []
+        metadatas = stored.get("metadatas") or []
+        rows = [
+            (str(chunk_id), text, metadata)
+            for chunk_id, text, metadata in zip(ids, documents, metadatas)
+            if isinstance(text, str)
+            and isinstance(metadata, dict)
+            and metadata.get("video_id") == video_id
+        ]
+        if not rows or not any(tokenize(text) for _, text, _ in rows):
+            return dense_candidates
+
+        tokenized_documents = [tokenize(text) for _, text, _ in rows]
+        query_tokens = tokenize(query_text)
+        lexical_scores = BM25Okapi(tokenized_documents).get_scores(query_tokens) if query_tokens else []
+        lexical_ranked = sorted(
+            (
+                (rows[index][0], float(score))
+                for index, score in enumerate(lexical_scores)
+                if score > 0
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )[:top_k]
+
+        merged: dict[str, dict[str, object]] = {}
+        for rank, candidate in enumerate(dense_candidates, start=1):
+            candidate_id = str(candidate.get("id", ""))
+            if not candidate_id:
+                metadata = candidate.get("metadata")
+                candidate_id = str(metadata.get("chunk_id", rank)) if isinstance(metadata, dict) else str(rank)
+            merged[candidate_id] = {**candidate, "_dense_rank": rank}
+
+        for rank, (chunk_id, _score) in enumerate(lexical_ranked, start=1):
+            row = next(item for item in rows if item[0] == chunk_id)
+            candidate = merged.setdefault(
+                chunk_id,
+                {
+                    "id": chunk_id,
+                    "text": row[1],
+                    "metadata": row[2],
+                    "distance": None,
+                    "similarity": 0.0,
+                },
+            )
+            candidate["_lexical_rank"] = rank
+
+        if not merged:
+            return []
+        for candidate in merged.values():
+            rrf_score = sum(
+                1.0 / (60 + int(candidate[f"_{rank_key}"]))
+                for rank_key in ("dense_rank", "lexical_rank")
+                if f"_{rank_key}" in candidate
+            )
+            candidate["rrf_score"] = rrf_score
+        ordered = sorted(
+            merged.values(),
+            key=lambda item: (-float(item["rrf_score"]), str(item["id"])),
+        )[:top_k]
+        highest_score = float(ordered[0]["rrf_score"])
+        for candidate in ordered:
+            normalized = float(candidate["rrf_score"]) / highest_score if highest_score else 0.0
+            candidate["dense_similarity"] = candidate["similarity"]
+            candidate["similarity"] = normalized
+        return ordered
 
     def exists(self, video_id: str) -> bool:
         try:

@@ -14,3 +14,12 @@ def test_allowed_origins_accept_comma_separated_environment_value() -> None:
     )
 
     assert settings.allowed_origins == ("https://app.example", "http://localhost:5173")
+
+
+def test_retrieval_improvements_are_disabled_by_default() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.query_rewrite is False
+    assert settings.hybrid is False
+    assert settings.rerank is False
+    assert settings.rerank_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"

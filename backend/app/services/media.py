@@ -137,7 +137,7 @@ class MediaService:
             "--no-playlist",
             "--no-warnings",
             "--no-call-home",
-            "--allowed-extractors",
+            "--use-extractors",
             "youtube",
             url,
         ]
@@ -196,7 +196,7 @@ class MediaService:
         self.validate_youtube_url(url)
         self._run_ytdlp([
             sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
-            "--allowed-extractors", "youtube",
+            "--use-extractors", "youtube",
             "--no-call-home", "--max-filesize", str(settings.max_upload_bytes),
             "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best",
             "--output", str(output_dir / f"{basename}.%(ext)s"), url,

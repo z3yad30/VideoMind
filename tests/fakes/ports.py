@@ -185,6 +185,7 @@ class FakeVectorStore:
         self.results = results or []
         self.chunks: dict[str, list[dict[str, object]]] = {}
         self.queries: list[tuple[str, list[float], int]] = []
+        self.hybrid_queries: list[tuple[str, list[float], str, int]] = []
 
     def upsert(self, video_id: str, chunks: list[dict[str, object]]) -> None:
         self.chunks[video_id] = chunks
@@ -193,6 +194,16 @@ class FakeVectorStore:
         self.queries.append((video_id, embedding, top_k))
         return [chunk for chunk in self.results if chunk.get("metadata", {}).get("video_id", video_id) == video_id][:top_k]
 
+    def query_hybrid(
+        self,
+        video_id: str,
+        embedding: list[float],
+        _query_text: str,
+        top_k: int,
+    ) -> list[dict[str, object]]:
+        self.hybrid_queries.append((video_id, embedding, _query_text, top_k))
+        return self.query(video_id, embedding, top_k)
+
     def exists(self, video_id: str) -> bool:
         return video_id in self.chunks
 
@@ -200,14 +211,26 @@ class FakeVectorStore:
         self.chunks.pop(video_id, None)
 
 
+class FakeReranker:
+    def rerank(
+        self,
+        _query: str,
+        candidates: list[dict[str, object]],
+        top_k: int,
+    ) -> list[dict[str, object]]:
+        return list(reversed(candidates))[:top_k]
+
+
 class FakeLLMClient:
     def __init__(self, responses: list[str] | None = None) -> None:
         self.responses = list(responses or [])
         self.prompts: list[str] = []
+        self.messages: list[list[dict[str, str]]] = []
         self.options: list[dict[str, object]] = []
 
     def complete(self, messages: list[dict[str, str]], **opts: object) -> str:
-        self.prompts.append(messages[0]["content"])
+        self.messages.append(messages)
+        self.prompts.append("\n\n".join(message["content"] for message in messages))
         self.options.append(opts)
         return self.responses.pop(0)
 

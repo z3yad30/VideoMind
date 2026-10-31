@@ -108,7 +108,7 @@ Never hardcode or commit API keys. `.env` is ignored by Git. Tests must use mock
 
 The application loads its environment through the central `pydantic-settings` configuration in `backend/app/core/config.py`; `.env.example` lists every configurable variable and its default. `DATABASE_URL`, `SQLITE_BUSY_TIMEOUT_MS`, `WORKER_MODE`, and `MAX_CONCURRENT_JOBS` configure persistence and worker behavior. `WORKER_MODE` is `embedded` by default; `external` disables the API's worker thread. `MAX_CONCURRENT_JOBS` defaults to `1`. `COOKIE_SECURE` defaults to false for local development and true when `APP_ENV=production`; SameSite remains Lax. `ALLOWED_ORIGINS` is a comma-separated origin allowlist and defaults to the Vite origins on port 5173. Unsafe HTTP methods require a matching Origin or Referer.
 
-ASR defaults to `ASR_DEVICE=cpu` with `ASR_COMPUTE_TYPE=int8` for broad compatibility. On an NVIDIA GPU with a compatible CUDA/cuDNN runtime, set these in your untracked `.env` to `ASR_DEVICE=cuda` and `ASR_COMPUTE_TYPE=float16`; the checked-in `.env.example` stays on portable defaults.
+ASR defaults to `ASR_DEVICE=cpu` with `ASR_COMPUTE_TYPE=int8` for broad compatibility. On an NVIDIA GPU with a compatible CUDA/cuDNN runtime, set these in your untracked `.env` to `ASR_DEVICE=cuda` and `ASR_COMPUTE_TYPE=float16`; the checked-in `.env.example` stays on portable defaults. If Faster-Whisper reports a missing cuBLAS/cuDNN library, it logs a warning and retries that transcription on CPU with `int8`.
 
 Logs are newline-delimited JSON and include available request, user, video, and job identifiers without usernames, tokens, passwords, or prompt content. Each request returns an `X-Request-ID` header. LLM completion logs include latency and token counts only. `/health` is a liveness check; `/health/ready` returns 503 with individual dependency checks when the database, FFmpeg executable, writable data directory, or Groq key is unavailable.
 
@@ -121,7 +121,16 @@ Open a Command Prompt at the repository root and start the backend:
 ```cmd
 cd /d C:\Users\Royal\Projects\VideoMind
 .venv\Scripts\activate
+python -m alembic upgrade head
 uvicorn backend.app.main:app --reload
+```
+
+For an existing installation with legacy JSON data, import it once after the
+schema upgrade and before starting the API:
+
+```cmd
+python -m scripts.migrate_json_to_db --dry-run
+python -m scripts.migrate_json_to_db
 ```
 
 With the default `WORKER_MODE=embedded`, the API starts its durable-job worker in a background thread. To run it in a separate terminal instead, set `WORKER_MODE=external` in `.env`, start the API as usual, then run:
@@ -344,7 +353,9 @@ The implemented retrieval policy is:
 
 This is a dynamic filter: weak results are discarded before the LLM sees them, but retrieval failure does not stop the question from being processed. If no transcript chunks pass the threshold, the system selects question-focused raw transcript excerpts from the resolved asset's `data/transcripts/{asset_id}.json` (or the YouTube video ID), preserving timestamps and limiting the context to 12,000 characters before asking the LLM whether the question is answerable. The structured summary remains available for display and audio, but is not used as the no-match question context.
 
-The LLM must not invent unsupported facts. If the question is unrelated to the video or the raw transcript has insufficient evidence, the answer states that the available video context does not provide enough information. Voice-question transcriptions are query-only and are never inserted into the video's transcript collection.
+`QUERY_REWRITE`, `HYBRID`, and `RERANK` are optional retrieval improvements and default to `false`. Query rewriting uses the last three chat messages when available, but the original question remains visible to the answer model; failures fall back to the original query. Hybrid retrieval combines dense and BM25 results with reciprocal rank fusion. Reranking lazily loads the configured `RERANK_MODEL` and reranks up to 20 candidates to the top 5. The [`evals/` harness](./evals/README.md) compares each option against baseline; flags should only be enabled by default after real-data results show improved Recall@5 without increasing raw-transcript fallback.
+
+Retrieved evidence and conversation history are explicitly marked as untrusted data in the answer prompt and must not be followed as instructions. The answer model is instructed not to invent unsupported facts, and timestamp citations not present among the returned source intervals are removed. If the question is unrelated to the video or the raw transcript has insufficient evidence, the answer states that the available video context does not provide enough information. Voice-question transcriptions are query-only and are never inserted into the video's transcript collection.
 
 ## YouTube and Upload Processing
 

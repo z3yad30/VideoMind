@@ -8,6 +8,7 @@ import pytest
 from backend.app.adapters.blob_store import LocalBlobStore
 from backend.app.adapters.embeddings import SentenceTransformerEmbedder
 from backend.app.adapters.llm import GroqLLMClient
+from backend.app.adapters.reranker import SentenceTransformerReranker
 from backend.app.adapters.transcriber import FasterWhisperTranscriber
 from backend.app.adapters.tts import Pyttsx3TTS
 from backend.app.adapters.vector_store import ChromaVectorStore
@@ -74,6 +75,45 @@ def test_faster_whisper_transcriber_preserves_segments(monkeypatch: pytest.Monke
     assert FasterWhisperTranscriber().transcribe(Path("audio.wav")) == [Segment(" transcript ", 0.5, 2.25)]
 
 
+def test_faster_whisper_retries_missing_cuda_library_on_cpu_int8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_devices: list[tuple[str, str]] = []
+
+    class Model:
+        def __init__(self, _name: str, *, device: str, compute_type: str) -> None:
+            model_devices.append((device, compute_type))
+            self.device = device
+
+        def transcribe(self, _audio_path: str):
+            if self.device == "cuda":
+                raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+            return [SimpleNamespace(text=" transcript ", start=0.5, end=2.25)], None
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=Model))
+    transcriber = FasterWhisperTranscriber(device="cuda", compute_type="float16")
+
+    assert transcriber.transcribe(Path("audio.wav")) == [Segment(" transcript ", 0.5, 2.25)]
+    assert model_devices == [("cuda", "float16"), ("cpu", "int8")]
+    assert (transcriber.device, transcriber.compute_type) == ("cpu", "int8")
+
+
+def test_faster_whisper_does_not_fallback_for_unrelated_runtime_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Model:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def transcribe(self, _audio_path: str):
+            raise RuntimeError("invalid audio input")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=Model))
+
+    with pytest.raises(RuntimeError, match="invalid audio input"):
+        FasterWhisperTranscriber(device="cuda").transcribe(Path("audio.wav"))
+
+
 def test_sentence_transformer_embedder_returns_plain_float_lists() -> None:
     class Model:
         def encode(self, texts, normalize_embeddings):
@@ -81,6 +121,22 @@ def test_sentence_transformer_embedder_returns_plain_float_lists() -> None:
             return [[1, 2.5] for _ in texts]
 
     assert SentenceTransformerEmbedder(model=Model()).embed(["one"]) == [[1.0, 2.5]]
+
+
+def test_cross_encoder_reranker_is_injected_and_orders_candidates() -> None:
+    class Model:
+        def predict(self, pairs):
+            assert pairs == [("question", "low"), ("question", "high")]
+            return [0.1, 0.9]
+
+    candidates = [
+        {"text": "low", "metadata": {"start": 1.0, "end": 2.0}},
+        {"text": "high", "metadata": {"start": 3.0, "end": 4.0}},
+    ]
+
+    results = SentenceTransformerReranker(model=Model()).rerank("question", candidates, 1)
+
+    assert results == [{**candidates[1], "rerank_score": 0.9}]
 
 
 def test_chroma_vector_store_maps_chunks_and_scopes_queries() -> None:
@@ -107,6 +163,7 @@ def test_chroma_vector_store_maps_chunks_and_scopes_queries() -> None:
 
         def query(self, **kwargs):
             return {
+                "ids": [["0"]],
                 "documents": [["fact"]],
                 "metadatas": [[{"video_id": "video", "start": 1.0, "end": 2.0}]],
                 "distances": [[0.1]],
@@ -147,6 +204,48 @@ def test_chroma_vector_store_maps_chunks_and_scopes_queries() -> None:
     assert client.collection.stored == {}
     assert client.collection.deleted == ["0"]
     store.delete_video("video")
+
+
+def test_chroma_hybrid_query_merges_dense_and_bm25_results() -> None:
+    class Collection:
+        metadata = {"hnsw:space": "cosine"}
+
+        def get(self, include=None):
+            return {
+                "ids": ["dense", "lexical", "neutral"],
+                "documents": [
+                    "generic semantic result",
+                    "rare zebra keyword appears here",
+                    "a third unrelated transcript passage",
+                ],
+                "metadatas": [
+                    {"video_id": "video", "chunk_id": "dense", "start": 1.0, "end": 2.0},
+                    {"video_id": "video", "chunk_id": "lexical", "start": 3.0, "end": 4.0},
+                    {"video_id": "video", "chunk_id": "neutral", "start": 5.0, "end": 6.0},
+                ],
+            }
+
+        def query(self, **_kwargs):
+            return {
+                "ids": [["dense"]],
+                "documents": [["generic semantic result"]],
+                "metadatas": [[{"video_id": "video", "chunk_id": "dense", "start": 1.0, "end": 2.0}]],
+                "distances": [[0.1]],
+                "embeddings": [[[1.0, 0.0]]],
+            }
+
+    class Client:
+        def get_collection(self, name):
+            assert name == "video_video"
+            return Collection()
+
+    store = ChromaVectorStore(Path("unused"), client=Client())
+    results = store.query_hybrid("video", [1.0, 0.0], "zebra keyword", 5)
+
+    assert {item["id"] for item in results} == {"dense", "lexical"}
+    lexical_result = next(item for item in results if item["id"] == "lexical")
+    assert lexical_result["metadata"]["start"] == 3.0
+    assert lexical_result["similarity"] > 0
 
 
 def test_groq_client_uses_injected_sdk_module(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,7 +293,11 @@ def test_container_composes_services_from_adapters(monkeypatch: pytest.MonkeyPat
     llm_client = FakeLLMClient()
     tts = FakeTTS()
     blob_store = FakeBlobStore(tmp_path / "data")
-    monkeypatch.setattr(container_module, "settings", SimpleNamespace(project_root=tmp_path))
+    monkeypatch.setattr(
+        container_module,
+        "settings",
+        SimpleNamespace(project_root=tmp_path, hybrid=False, rerank=False),
+    )
     monkeypatch.setattr(container_module, "LocalBlobStore", lambda _root: blob_store)
     monkeypatch.setattr(container_module, "FasterWhisperTranscriber", lambda: transcriber)
     monkeypatch.setattr(container_module, "SentenceTransformerEmbedder", lambda: embedder)

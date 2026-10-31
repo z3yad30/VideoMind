@@ -5,6 +5,7 @@ from backend.app.adapters import (
     ChromaVectorStore,
     FasterWhisperTranscriber,
     GroqLLMClient,
+    SentenceTransformerReranker,
     SqlJobQueue,
     LocalBlobStore,
     Pyttsx3TTS,
@@ -27,6 +28,7 @@ class ApplicationContainer:
     embedder: SentenceTransformerEmbedder
     vector_store: ChromaVectorStore
     llm_client: GroqLLMClient
+    reranker: SentenceTransformerReranker
     tts: Pyttsx3TTS
     media: MediaService
     rag: TranscriptRAGService
@@ -53,9 +55,17 @@ def get_container() -> ApplicationContainer:
     embedder = SentenceTransformerEmbedder()
     vector_store = _get_vector_store()
     llm_client = GroqLLMClient()
+    reranker = SentenceTransformerReranker()
     tts = Pyttsx3TTS()
     media = MediaService()
-    rag = TranscriptRAGService(blob_store, embedder, vector_store)
+    rag = TranscriptRAGService(
+        blob_store,
+        embedder,
+        vector_store,
+        reranker=reranker,
+        hybrid_enabled=settings.hybrid,
+        rerank_enabled=settings.rerank,
+    )
     ai = VideoAIService(GroqLLMService(llm_client), rag, blob_store, tts)
     video_processing = VideoProcessingService(media, transcriber, ai, blob_store, job_queue)
     voice = VoiceQuestionService(ai, media, transcriber, tts, blob_store)
@@ -66,6 +76,7 @@ def get_container() -> ApplicationContainer:
         embedder=embedder,
         vector_store=vector_store,
         llm_client=llm_client,
+        reranker=reranker,
         tts=tts,
         media=media,
         rag=rag,
